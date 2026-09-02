@@ -173,9 +173,17 @@ function HFB.resolve(ref)
 end
 
 -- All reflected properties of an object, walking the super chain. Returns {name, type, value}.
-function HFB.props(ref, includeSuper)
+-- Reading a SoftObjectProperty has hard-crashed the game (null dereference inside UE4SS's own
+-- property reader, uncatchable by pcall). Most soft reads are harmless and yield a wrapper whose
+-- fields all probe nil anyway, so the information is worth almost nothing and the downside is the
+-- user's session. Skipped unless readSoft is passed explicitly.
+local UNSAFE_TYPES = { SoftObjectProperty = true, SoftClassProperty = true }
+
+function HFB.props(ref, includeSuper, readSoft)
     local obj = HFB.resolve(ref)
-    if includeSuper == nil then includeSuper = true end
+    -- Defaults to false. A full super-chain walk on a live actor has crashed the game with a null
+    -- dereference inside UE4SS's own property reader, which no pcall can catch.
+    if includeSuper == nil then includeSuper = false end
     local out, seen = {}, {}
     local cls = obj:GetClass()
     while cls and cls:IsValid() do
@@ -184,11 +192,20 @@ function HFB.props(ref, includeSuper)
             if not seen[name] then
                 seen[name] = true
                 local ptype = safe(function() return prop:GetClass():GetFName():ToString() end)
-                local ok, val = pcall(function() return obj[name] end)
-                out[#out + 1] = {
-                    name = name, type = ptype,
-                    value = ok and encodeValue(val, 1) or ("<error: " .. tostring(val) .. ">"),
-                }
+                -- Branch explicitly. The `ok and encode(val) or "<error>"` idiom misreports
+                -- every property that encodes to false or nil, because the and-branch is falsy.
+                local encoded
+                if UNSAFE_TYPES[ptype] and not readSoft then
+                    encoded = "<skipped: " .. ptype .. ">"
+                else
+                    local ok, val = pcall(function() return obj[name] end)
+                    if ok then
+                        encoded = encodeValue(val, 1)
+                    else
+                        encoded = "<error: " .. tostring(val) .. ">"
+                    end
+                end
+                out[#out + 1] = { name = name, type = ptype, value = encoded }
             end
         end)
         if not includeSuper then break end

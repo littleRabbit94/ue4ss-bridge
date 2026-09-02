@@ -195,8 +195,14 @@ def build_server():
         return _helper(f"HFB.types({_lua_literal(pattern)}, {int(limit)})", timeout=30)
 
     @mcp.tool()
-    def inspect_object(ref: str, include_super: bool = True) -> dict:
-        """Every reflected property of an object with its current value. Use on CDOs and live actors."""
+    def inspect_object(ref: str, include_super: bool = False) -> dict:
+        """Every reflected property of an object with its current value. Use on CDOs and live actors.
+
+        include_super defaults to False. The full chain is now survivable, since HFB.props skips
+        SoftObjectProperty reads (the null dereference inside UE4SS's own property reader that no
+        Lua pcall can catch), but it is the more expensive call and the conservative default is the
+        useful one. See "The live bridge" in docs/ue4ss.md.
+        """
         return _helper(f"HFB.props({_lua_literal(ref)}, {'true' if include_super else 'false'})", timeout=30)
 
     @mcp.tool()
