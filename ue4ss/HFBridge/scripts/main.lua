@@ -80,7 +80,10 @@ end
 
 -- Value serialisation --------------------------------------------------------------------
 
-local MAX_DEPTH = 4
+-- 6, not 4: a batch nests each result two levels below the response root, and at 4 the property
+-- VALUES inside a batched props call encoded as "<depth>". Scalars are returned before the depth
+-- check, so only object and struct values were affected, which made the truncation easy to miss.
+local MAX_DEPTH = 6
 local MAX_ITEMS = 200
 
 local function safe(fn, ...)
@@ -197,8 +200,14 @@ end
 -- user's session. Skipped unless readSoft is passed explicitly.
 local UNSAFE_TYPES = { SoftObjectProperty = true, SoftClassProperty = true }
 
-function HFB.props(ref, includeSuper, readSoft)
+function HFB.props(ref, includeSuper, readSoft, pattern)
     local obj = HFB.resolve(ref)
+    -- Validate the pattern once here; an invalid one thrown inside ForEachProperty is reported
+    -- against the property rather than the caller's argument, which is confusing.
+    if pattern ~= nil then
+        local okPat = pcall(string.match, "probe", pattern)
+        if not okPat then error("invalid Lua pattern: " .. tostring(pattern)) end
+    end
     -- Defaults to false. A full super-chain walk on a live actor has crashed the game with a null
     -- dereference inside UE4SS's own property reader, which no pcall can catch.
     if includeSuper == nil then includeSuper = false end
@@ -209,7 +218,8 @@ function HFB.props(ref, includeSuper, readSoft)
         cls:ForEachProperty(function(prop)
             local name = prop:GetFName():ToString()
             if not seen[name] then
-                seen[name] = true
+                seen[name] = true          -- dedupe across the chain even when filtered out
+                if pattern and not name:match(pattern) then return end
                 local ptype = safe(function() return prop:GetClass():GetFName():ToString() end)
                 trace("props " .. tostring(cname) .. "." .. name .. " (" .. tostring(ptype) .. ")")
                 -- Branch explicitly. The `ok and encode(val) or "<error>"` idiom misreports
@@ -393,6 +403,46 @@ local dumpers = {
     objects = function() DumpAllObjects() end,
     static_meshes = function() DumpStaticMeshes() end,
 }
+-- One round trip costs a 250 ms poll plus latency, against single-digit ms of actual work, so a
+-- sequence of small calls is nearly all waiting. Batch runs them in one request. Each entry is
+-- pcall-fenced so one failure does not lose the results either side of it.
+local BATCH_OPS = {
+    world   = function(a) return HFB.world() end,
+    get     = function(a) return HFB.get(a.ref, a.name) end,
+    set     = function(a) return HFB.set(a.ref, a.name, a.value) end,
+    call    = function(a) return HFB.call(a.ref, a["function"], a.args) end,
+    props   = function(a) return HFB.props(a.ref, a.include_super, a.read_soft, a.pattern) end,
+    funcs   = function(a) return HFB.funcs(a.ref) end,
+    objects = function(a) return HFB.objects(a.class_name, a.limit) end,
+    types   = function(a) return HFB.types(a.pattern, a.limit) end,
+    console = function(a) return HFB.console(a.command) end,
+    find    = function(a)
+        local o = HFB.resolve(a.ref)
+        return { object = o:GetFullName(), class = o:GetClass():GetFullName(), address = o:GetAddress() }
+    end,
+}
+
+function HFB.batch(calls)
+    if type(calls) ~= "table" then error("batch expects a list of calls") end
+    local out = {}
+    for i, c in ipairs(calls) do
+        local op = tostring(c and c.op)
+        local fn = BATCH_OPS[op]
+        if not fn then
+            local known = {}
+            for k in pairs(BATCH_OPS) do known[#known + 1] = k end
+            table.sort(known)
+            out[i] = { op = op, ok = false, error = "unknown batch op '" .. op .. "'; known: " .. table.concat(known, ", ") }
+        else
+            trace("batch[" .. i .. "] " .. op)
+            local ok, res = pcall(fn, c)
+            if ok then out[i] = { op = op, ok = true, result = res }
+            else out[i] = { op = op, ok = false, error = tostring(res) } end
+        end
+    end
+    return out
+end
+
 function HFB.dump(kind)
     local fn = dumpers[kind]
     if not fn then error("unknown dump kind " .. tostring(kind)) end

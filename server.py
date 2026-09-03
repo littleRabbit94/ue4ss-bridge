@@ -255,15 +255,22 @@ def build_server():
         return _helper(f"HFB.types({_lua_literal(pattern)}, {int(limit)})", timeout=30)
 
     @mcp.tool()
-    def inspect_object(ref: str, include_super: bool = False) -> dict:
+    def inspect_object(ref: str, include_super: bool = False, pattern: str | None = None) -> dict:
         """Every reflected property of an object with its current value. Use on CDOs and live actors.
+
+        pattern is an optional Lua pattern matched against the property name, e.g. "^Camera" or
+        "Speed" — one pawn is 305 properties, so filtering is usually what you want.
 
         include_super defaults to False. The full chain is now survivable, since HFB.props skips
         SoftObjectProperty reads (the null dereference inside UE4SS's own property reader that no
         Lua pcall can catch), but it is the more expensive call and the conservative default is the
         useful one. See "The live bridge" in docs/ue4ss.md.
         """
-        return _helper(f"HFB.props({_lua_literal(ref)}, {'true' if include_super else 'false'})", timeout=30)
+        return _helper(
+            f"HFB.props({_lua_literal(ref)}, {'true' if include_super else 'false'}, false, "
+            f"{_lua_literal(pattern)})",
+            timeout=30,
+        )
 
     @mcp.tool()
     def list_functions(ref: str) -> dict:
@@ -284,6 +291,29 @@ def build_server():
         silently doing nothing.
         """
         return _helper(f"HFB.set({_lua_literal(ref)}, {_lua_literal(name)}, {_lua_literal(value)})")
+
+    @mcp.tool()
+    def batch(calls: list[dict]) -> dict:
+        """Run several bridge operations in ONE round trip and return a result per call.
+
+        A round trip costs a 250 ms poll plus latency against single-digit ms of actual work, so a
+        sequence of small calls is nearly all waiting. Each entry is a dict with an "op" key:
+
+          {"op": "world"}
+          {"op": "find",    "ref": ...}
+          {"op": "get",     "ref": ..., "name": ...}
+          {"op": "set",     "ref": ..., "name": ..., "value": ...}
+          {"op": "call",    "ref": ..., "function": ..., "args": [...]}
+          {"op": "props",   "ref": ..., "include_super": bool, "read_soft": bool, "pattern": str}
+          {"op": "funcs",   "ref": ...}
+          {"op": "objects", "class_name": ..., "limit": int}
+          {"op": "types",   "pattern": ..., "limit": int}
+          {"op": "console", "command": ...}
+
+        Each result is {op, ok, result} or {op, ok: false, error}. One failing call does not
+        abandon the rest, so a batch is safe to use for exploration.
+        """
+        return _helper(f"HFB.batch({_lua_literal(calls)})", timeout=60)
 
     @mcp.tool()
     def call_function(ref: str, function: str, args: list[Any] | None = None) -> dict:
