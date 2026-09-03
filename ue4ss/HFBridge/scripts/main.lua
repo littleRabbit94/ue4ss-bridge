@@ -112,17 +112,81 @@ local function encodeArray(arr, depth)
     return out
 end
 
--- The UE4SS UScriptStruct wrapper does not expose its own type, so probe common field names.
+local UNSAFE_TYPES = { SoftObjectProperty = true, SoftClassProperty = true }
+
+-- Fallback only, for a struct whose type will not resolve. This list used to be the ONLY way
+-- fields were found, so anything not named here was invisible.
 local STRUCT_FIELDS = { "X", "Y", "Z", "W", "Pitch", "Yaw", "Roll", "R", "G", "B", "A",
                         "Min", "Max", "AssetPath", "SubPathString", "PackageName", "AssetName",
                         "TagName", "Value", "Guid", "B", "C", "D", "Key" }
 
+-- A struct value's GetFullName() reports its TYPE, e.g. "ScriptStruct /Script/CoreUObject.Vector",
+-- and that path resolves to a UScriptStruct whose properties walk like any class. Cached, since the
+-- lookup repeats for every value of the same type in a dump.
+local STRUCT_TYPE_CACHE = {}
+
+local function structType(s)
+    local ok, full = pcall(function() return s:GetFullName() end)
+    if not ok or type(full) ~= "string" then return nil, nil end
+    local path = full:match("^%S+%s+(.+)$") or full
+    local hit = STRUCT_TYPE_CACHE[path]
+    if hit ~= nil then
+        if hit == false then return nil, path end
+        return hit, path
+    end
+    local st = StaticFindObject(path)
+    if st and safe(function() return st:IsValid() end) then
+        STRUCT_TYPE_CACHE[path] = st
+        return st, path
+    end
+    STRUCT_TYPE_CACHE[path] = false
+    return nil, path
+end
+
+-- Blueprint UserDefinedStruct fields carry a "_<n>_<32 hex>" suffix. Read by the raw reflected
+-- name, report the readable one.
+local function fieldName(n)
+    local base, _, hex = n:match("^(.-)_(%d+)_(%x+)$")
+    if base and #hex == 32 then return base end
+    return n
+end
+
 local function encodeStruct(s, depth)
     local out = { __struct = true }
     out.address = safe(function() return s:GetStructAddress() end)
-    for _, k in ipairs(STRUCT_FIELDS) do
-        local v = safe(function() return s[k] end)
-        if v ~= nil then out[k] = encodeValue(v, depth + 1) end
+    local st, path = structType(s)
+    out.__type = path
+    if not st then
+        out.__fields = "guessed"          -- type would not resolve; fall back to the probe list
+        for _, k in ipairs(STRUCT_FIELDS) do
+            local v = safe(function() return s[k] end)
+            if v ~= nil then out[k] = encodeValue(v, depth + 1) end
+        end
+        return out
+    end
+    -- Structs inherit, exactly like classes: FVector_NetQuantize100 declares nothing of its own and
+    -- gets X/Y/Z from FVector, FActorTickFunction gets 7 fields from FTickFunction. Walking only
+    -- the leaf reported those as empty.
+    local seen = {}
+    while st and st:IsValid() do
+        st:ForEachProperty(function(prop)
+            local rawn = prop:GetFName():ToString()
+            if seen[rawn] then return end
+            seen[rawn] = true
+            local ptype = safe(function() return prop:GetClass():GetFName():ToString() end)
+            local key = fieldName(rawn)
+            if UNSAFE_TYPES[ptype] then
+                out[key] = "<skipped: " .. tostring(ptype) .. ">"
+                return
+            end
+            local ok, v = pcall(function() return s[rawn] end)
+            if ok then
+                out[key] = encodeValue(v, depth + 1)
+            else
+                out[key] = "<error: " .. tostring(v) .. ">"
+            end
+        end)
+        st = safe(function() return st:GetSuperStruct() end)
     end
     return out
 end
@@ -198,8 +262,6 @@ end
 -- property reader, uncatchable by pcall). Most soft reads are harmless and yield a wrapper whose
 -- fields all probe nil anyway, so the information is worth almost nothing and the downside is the
 -- user's session. Skipped unless readSoft is passed explicitly.
-local UNSAFE_TYPES = { SoftObjectProperty = true, SoftClassProperty = true }
-
 function HFB.props(ref, includeSuper, readSoft, pattern)
     local obj = HFB.resolve(ref)
     -- Validate the pattern once here; an invalid one thrown inside ForEachProperty is reported
