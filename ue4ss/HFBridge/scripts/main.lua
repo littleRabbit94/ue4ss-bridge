@@ -253,14 +253,54 @@ function HFB.funcs(ref)
     return out
 end
 
+-- UE4SS hands back a bogus "<invalid>" UObject for a name the class does not declare, instead of
+-- failing. A typo therefore reads back as something that looks like data, and a WRITE silently does
+-- nothing while reporting success. Both are checked against the reflection first.
+local function declaresProperty(cls, name)
+    while cls and cls:IsValid() do
+        local found = false
+        cls:ForEachProperty(function(prop)
+            if prop:GetFName():ToString() == name then found = true end
+        end)
+        if found then return true end
+        cls = safe(function() return cls:GetSuperStruct() end)
+    end
+    return false
+end
+
+local function declaresFunction(cls, name)
+    while cls and cls:IsValid() do
+        local found = false
+        cls:ForEachFunction(function(fn)
+            if fn:GetFName():ToString() == name then found = true end
+        end)
+        if found then return true end
+        cls = safe(function() return cls:GetSuperStruct() end)
+    end
+    return false
+end
+
+local function requireProperty(obj, name)
+    local cls = obj:GetClass()
+    if declaresProperty(cls, name) then return end
+    local cname = tostring(safe(function() return cls:GetFName():ToString() end))
+    if declaresFunction(cls, name) then
+        error("'" .. name .. "' is a UFunction on " .. cname .. ", not a property; call it with call_function")
+    end
+    error("no property '" .. name .. "' on " .. cname .. "; inspect_object lists the ones it has")
+end
+
 function HFB.get(ref, prop)
-    return HFB.resolve(ref)[prop]
+    local obj = HFB.resolve(ref)
+    requireProperty(obj, prop)
+    return obj[prop]
 end
 
 -- Returns { previous, current }. Writes are never undone, so handing back the prior value is what
 -- makes a restore possible without a separate read first.
 function HFB.set(ref, prop, value)
     local obj = HFB.resolve(ref)
+    requireProperty(obj, prop)
     local okPrev, prev = pcall(function() return obj[prop] end)
     local out = {}
     if okPrev then

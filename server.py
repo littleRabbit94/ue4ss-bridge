@@ -272,7 +272,7 @@ def build_server():
 
     @mcp.tool()
     def get_property(ref: str, name: str) -> dict:
-        """Read one property of an object."""
+        """Read one property of an object. An unknown property name raises rather than returning junk."""
         return _helper(f"HFB.get({_lua_literal(ref)}, {_lua_literal(name)})")
 
     @mcp.tool()
@@ -280,7 +280,8 @@ def build_server():
         """Write one property of an object (number, bool or string).
 
         Returns {previous, current}. Writes are never undone, so `previous` is what you restore
-        from if the write turns out to be wrong.
+        from if the write turns out to be wrong. An unknown property name raises instead of
+        silently doing nothing.
         """
         return _helper(f"HFB.set({_lua_literal(ref)}, {_lua_literal(name)}, {_lua_literal(value)})")
 
