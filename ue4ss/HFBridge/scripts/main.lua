@@ -1,5 +1,5 @@
 -- HFBridge: a file-based request/response channel so an external process (the MCP server in
--- tools/hf-bridge) can run Lua inside the live game without a relaunch per question.
+-- server.py at the root of the hf-bridge repo) can run Lua inside the live game without a relaunch per question.
 --
 --   external  ->  writes  <ue4ss>\bridge\request.json    {"id":..,"op":"eval","code":".."}
 --   this mod  ->  polls it, runs the code on the game thread, writes response.json

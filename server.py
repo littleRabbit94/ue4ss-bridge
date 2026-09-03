@@ -264,7 +264,7 @@ def build_server():
         include_super defaults to False. The full chain is now survivable, since HFB.props skips
         SoftObjectProperty reads (the null dereference inside UE4SS's own property reader that no
         Lua pcall can catch), but it is the more expensive call and the conservative default is the
-        useful one. See "The live bridge" in docs/ue4ss.md.
+        useful one. See "The live bridge" in docs/ue4ss.md of the private-toolkit repo.
         """
         return _helper(
             f"HFB.props({_lua_literal(ref)}, {'true' if include_super else 'false'}, false, "

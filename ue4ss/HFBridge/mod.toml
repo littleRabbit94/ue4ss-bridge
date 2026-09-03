@@ -5,7 +5,7 @@ id          = "hf-bridge"
 name        = "HFBridge"
 version     = "0.1.0"
 author      = "Rabbit"
-description = "Lua side of the live MCP bridge; tools/hf-bridge talks to it."
+description = "Lua side of the live MCP bridge; server.py at the repo root talks to it."
 
 [compat]
 game_build = "5.8-CL-56057345"
