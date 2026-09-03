@@ -40,6 +40,23 @@ local function log(fmt, ...)
     print("[HFBridge] " .. string.format(fmt, ...) .. "\n")
 end
 
+-- A crash inside UE4SS's native code takes the process down mid-request and no pcall can catch
+-- it, so the only way to learn what was in flight is to have written it to disk already. Keep ONE
+-- line, rewritten in place and flushed, naming the current operation. The MCP server reads it
+-- after a timeout to report what killed the game instead of guessing "blocked or long-running".
+local TRACE = DIR .. "/lastop.log"
+local traceHandle, traceOpened = nil, false
+local function trace(s)
+    if not traceOpened then traceHandle = io.open(TRACE, "wb") traceOpened = true end
+    if not traceHandle then return end
+    traceHandle:seek("set", 0)
+    -- Pad so a short line never leaves the tail of a longer one behind it.
+    -- Lua's string.format caps a field width at two digits, so %-300s is rejected. Pad by hand.
+    local line = tostring(s):sub(1, 300)
+    traceHandle:write(line .. string.rep(" ", 300 - #line))
+    traceHandle:flush()
+end
+
 -- File helpers --------------------------------------------------------------------------
 
 local function readFile(path)
@@ -148,6 +165,7 @@ end
 
 HFB = {}
 HFB.encode = encodeValue
+HFB.trace = trace
 
 -- Resolve an object reference string:
 --   "/Script/Pkg.Object"    full path, via StaticFindObject
@@ -187,11 +205,13 @@ function HFB.props(ref, includeSuper, readSoft)
     local out, seen = {}, {}
     local cls = obj:GetClass()
     while cls and cls:IsValid() do
+        local cname = safe(function() return cls:GetFName():ToString() end)
         cls:ForEachProperty(function(prop)
             local name = prop:GetFName():ToString()
             if not seen[name] then
                 seen[name] = true
                 local ptype = safe(function() return prop:GetClass():GetFName():ToString() end)
+                trace("props " .. tostring(cname) .. "." .. name .. " (" .. tostring(ptype) .. ")")
                 -- Branch explicitly. The `ok and encode(val) or "<error>"` idiom misreports
                 -- every property that encodes to false or nil, because the and-branch is falsy.
                 local encoded
@@ -237,10 +257,20 @@ function HFB.get(ref, prop)
     return HFB.resolve(ref)[prop]
 end
 
+-- Returns { previous, current }. Writes are never undone, so handing back the prior value is what
+-- makes a restore possible without a separate read first.
 function HFB.set(ref, prop, value)
     local obj = HFB.resolve(ref)
+    local okPrev, prev = pcall(function() return obj[prop] end)
+    local out = {}
+    if okPrev then
+        out.previous = encodeValue(prev, 1)
+    else
+        out.previous = "<unreadable: " .. tostring(prev) .. ">"
+    end
     obj[prop] = value
-    return obj[prop]
+    out.current = encodeValue(obj[prop], 1)
+    return out
 end
 
 function HFB.call(ref, fname, args)
@@ -374,8 +404,11 @@ local function handle(req)
         return
     end
     busy = true
+    trace("eval id=" .. tostring(req.id) .. " " .. req.code:gsub("%s+", " "))
     ExecuteInGameThread(function()
         local ok, result, output, err = runEval(req.code)
+        -- Cleared only on the way out, so a crash leaves the in-flight line on disk.
+        trace("idle after id=" .. tostring(req.id))
         respond(req.id, ok, result, output, err, started)
         busy = false
     end)

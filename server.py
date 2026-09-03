@@ -30,8 +30,61 @@ GAME_PROCESS = "The_Holy_Fool-Win64-Shipping"
 DEFAULT_TIMEOUT = 15.0
 
 
+CRASH_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "The_Holy_Fool" / "Saved" / "Crashes"
+
+
 class BridgeError(RuntimeError):
     pass
+
+
+def _last_op() -> str | None:
+    """What the mod was doing when it last wrote its trace line. See `trace` in main.lua."""
+    try:
+        text = (BRIDGE_DIR / "lastop.log").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _crash_since(started: float) -> dict | None:
+    """The newest crash report, if one was written after `started` (a time.time() stamp)."""
+    try:
+        folders = [d for d in CRASH_DIR.iterdir() if d.is_dir()]
+    except OSError:
+        return None
+    if not folders:
+        return None
+    newest = max(folders, key=lambda d: d.stat().st_mtime)
+    # Slack: the report is written as the process dies, moments after the call went out.
+    if newest.stat().st_mtime < started - 5:
+        return None
+    info: dict[str, Any] = {"report": str(newest)}
+    try:
+        xml = (newest / "CrashContext.runtime-xml").read_text(encoding="utf-8", errors="replace")
+        start = xml.find("<ErrorMessage>")
+        if start >= 0:
+            end = xml.find("</ErrorMessage>", start)
+            info["error"] = xml[start + len("<ErrorMessage>"):end].strip()
+    except OSError:
+        pass
+    return info
+
+
+def _crash_report(started: float) -> str:
+    """Explain a vanished game concretely instead of guessing 'blocked or long-running'."""
+    lines = ["the game crashed during this call (the process is gone)."]
+    op = _last_op()
+    if op:
+        lines.append("  in flight: " + op)
+    crash = _crash_since(started)
+    if crash:
+        if crash.get("error"):
+            lines.append("  crash: " + crash["error"])
+        lines.append("  report: " + crash["report"])
+    else:
+        lines.append("  no crash report was written; the process may have been closed instead.")
+    lines.append("  relaunch with scripts\\Start-Game.ps1")
+    return "\n".join(lines)
 
 
 def game_running() -> bool:
@@ -73,6 +126,7 @@ def request(op: str, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> dict:
     tmp_path.write_text(json.dumps(body), encoding="utf-8")
     os.replace(tmp_path, req_path)
 
+    started_wall = time.time()
     deadline = time.monotonic() + timeout
     picked_up = False
     while time.monotonic() < deadline:
@@ -98,9 +152,15 @@ def request(op: str, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> dict:
                 "mods.txt and that ue4ss\\UE4SS.log contains '[HFBridge] ready'."
             )
         raise BridgeError("request never picked up: the game is not running. Launch with scripts\\Start-Game.ps1.")
+    # Picked up, no answer. Overwhelmingly this means the snippet took the process down, so say so
+    # rather than making the caller guess between a crash and a loading screen.
+    if not game_running():
+        raise BridgeError(_crash_report(started_wall))
+    op = _last_op()
+    detail = ("\n  in flight: " + op) if op else ""
     raise BridgeError(
-        f"request {rid} was picked up but no response arrived within {timeout}s. "
-        "The game thread may be blocked (loading screen) or the snippet may be long-running."
+        f"request {rid} was picked up but no response arrived within {timeout}s. The game is still "
+        f"running, so the thread is blocked (loading screen) or the snippet is long-running.{detail}"
     )
 
 
@@ -217,7 +277,11 @@ def build_server():
 
     @mcp.tool()
     def set_property(ref: str, name: str, value: Any) -> dict:
-        """Write one property of an object (number, bool or string). Returns the value read back."""
+        """Write one property of an object (number, bool or string).
+
+        Returns {previous, current}. Writes are never undone, so `previous` is what you restore
+        from if the write turns out to be wrong.
+        """
         return _helper(f"HFB.set({_lua_literal(ref)}, {_lua_literal(name)}, {_lua_literal(value)})")
 
     @mcp.tool()
