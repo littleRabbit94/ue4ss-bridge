@@ -1,49 +1,84 @@
--- HFBridge: a file-based request/response channel so an external process (the MCP server in
--- server.py at the root of the hf-bridge repo) can run Lua inside the live game without a relaunch per question.
+-- UEBridge: a file-based request/response channel so an external process (the ue-bridge MCP
+-- server, or anything else that can write a file) can run Lua inside a live UE4SS game without a
+-- relaunch per question. Game-agnostic: nothing here names a game or an install path.
 --
 --   external  ->  writes  <ue4ss>\bridge\request.json    {"id":..,"op":"eval","code":".."}
 --   this mod  ->  polls it, runs the code on the game thread, writes response.json
 --
 -- The poll is a timer (LoopAsync), not a per-tick hook, and it only does work when the request
--- file exists. All game-object access happens inside ExecuteInGameThread.
+-- file exists. All game-object access happens inside ExecuteInGameThread. The mod opens no
+-- sockets and starts no processes; everything it does is in reply to a file in its own folder.
 --
--- Wire format
---   request : {"id": string, "op": "ping"|"eval", "code": string}
---   response: {"id", "ok": bool, "result": any, "output": [string], "error": string|null, "ms": n}
+-- Wire format (protocol 1)
+--   request : {"id": string, "op": "hello"|"ping"|"eval"|"batch", "code": string, "calls": [..]}
+--   response: {"id", "ok": bool, "result": any, "output": [string], "error": string|null,
+--              "ms": n, "protocol": 1}
 --
--- Eval snippets run in an environment that inherits _G plus the HFB helper table below. Whatever
+-- Eval snippets run in an environment that inherits _G plus the UEB helper table below. Whatever
 -- the chunk returns is serialised: UObjects become {"__object": fullname, "address": n}, FName /
--- FString become strings, TArrays become lists, structs report common field names one level deep.
+-- FString become strings, TArrays become lists, structs are walked through their reflected type.
 
-package.path = "Mods/HFBridge/scripts/?.lua;" .. package.path
-local json = require("json")
-local UEHelpers = require("UEHelpers")
+local VERSION = "1.0.0"
+local PROTOCOL = 1
+local MOD_NAME = "UEBridge"
 
+-- Paths -----------------------------------------------------------------------------------
 -- Lua's io resolves relative paths against the process working directory, which is
 -- Binaries\Win64 (the exe directory), NOT the ue4ss folder. Resolve an absolute path so the
 -- bridge always lands in <ue4ss>\bridge regardless of how the game was launched.
-local function bridgeDir()
+local function ue4ssDir()
     local ok, dirs = pcall(IterateGameDirectories)
     local win64 = ok and dirs and dirs.Game and dirs.Game.Binaries and dirs.Game.Binaries.Win64
     if win64 and win64.__absolute_path then
-        return win64.__absolute_path .. "\\ue4ss\\bridge"
+        return win64.__absolute_path .. "\\ue4ss"
     end
-    return "ue4ss/bridge"
+    return "ue4ss"
 end
-local DIR = bridgeDir()
+local UE4SS_DIR = ue4ssDir()
+local MOD_DIR = UE4SS_DIR .. "\\Mods\\" .. MOD_NAME
+local MOD_PATH = MOD_DIR .. "\\scripts\\main.lua"
+
+package.path = MOD_DIR .. "\\scripts\\?.lua;" .. package.path
+local json = require("json")
+local UEHelpers = require("UEHelpers")
+
+local function log(fmt, ...)
+    print("[" .. MOD_NAME .. "] " .. string.format(fmt, ...) .. "\n")
+end
+
+-- Settings ----------------------------------------------------------------------------------
+-- settings.lua beside the scripts folder is optional and user-editable; every key has a default.
+--   enabled       false turns the bridge off without removing the mod.
+--   poll_ms       how often the request file is checked.
+--   allow_eval    false refuses raw Lua ("eval"); the structured "batch" ops still work.
+--   allow_writes  false refuses anything that changes state: set, call, console, and eval.
+--   bridge_dir    override the request/response folder (absolute path).
+local SETTINGS = { enabled = true, poll_ms = 250, allow_eval = true, allow_writes = true, bridge_dir = nil }
+do
+    local chunk = loadfile(MOD_DIR .. "\\settings.lua")
+    if chunk then
+        local ok, user = pcall(chunk)
+        if ok and type(user) == "table" then
+            for k, v in pairs(user) do
+                if SETTINGS[k] ~= nil or k == "bridge_dir" then SETTINGS[k] = v end
+            end
+        else
+            log("settings.lua did not return a table (%s); using defaults", tostring(user))
+        end
+    end
+end
+if not SETTINGS.allow_writes then SETTINGS.allow_eval = false end
+
+local DIR = SETTINGS.bridge_dir or (UE4SS_DIR .. "\\bridge")
 local REQUEST = DIR .. "/request.json"
 local RESPONSE = DIR .. "/response.json"
 local RESPONSE_TMP = DIR .. "/response.tmp"
-local POLL_MS = 250
-
-local function log(fmt, ...)
-    print("[HFBridge] " .. string.format(fmt, ...) .. "\n")
-end
+local POLL_MS = tonumber(SETTINGS.poll_ms) or 250
 
 -- A crash inside UE4SS's native code takes the process down mid-request and no pcall can catch
 -- it, so the only way to learn what was in flight is to have written it to disk already. Keep ONE
--- line, rewritten in place and flushed, naming the current operation. The MCP server reads it
--- after a timeout to report what killed the game instead of guessing "blocked or long-running".
+-- line, rewritten in place and flushed, naming the current operation. The server reads it after
+-- a timeout to report what killed the game instead of guessing "blocked or long-running".
 local TRACE = DIR .. "/lastop.log"
 local traceHandle, traceOpened = nil, false
 local function trace(s)
@@ -228,17 +263,21 @@ function encodeValue(v, depth)
     return tostring(v)
 end
 
--- Helper library exposed to eval snippets as HFB -------------------------------------------
+-- Helper library exposed to eval snippets as UEB -------------------------------------------
 
-HFB = {}
-HFB.encode = encodeValue
-HFB.trace = trace
+UEB = {}
+HFB = UEB   -- older snippets written against the HFBridge name keep working
+UEB.encode = encodeValue
+UEB.trace = trace
+UEB.version = VERSION
+UEB.protocol = PROTOCOL
+UEB.settings = SETTINGS
 
 -- Resolve an object reference string:
 --   "/Script/Pkg.Object"    full path, via StaticFindObject
 --   "first:ClassName"       first live instance of that short class name
 --   "cdo:/Script/Pkg.Class" class default object of that class
-function HFB.resolve(ref)
+function UEB.resolve(ref)
     if type(ref) ~= "string" then return ref end
     local first = ref:match("^first:(.+)$")
     if first then
@@ -258,19 +297,19 @@ function HFB.resolve(ref)
 end
 
 -- All reflected properties of an object, walking the super chain. Returns {name, type, value}.
--- Reading a SoftObjectProperty has hard-crashed the game (null dereference inside UE4SS's own
+-- Reading a SoftObjectProperty has hard-crashed a game (null dereference inside UE4SS's own
 -- property reader, uncatchable by pcall). Most soft reads are harmless and yield a wrapper whose
 -- fields all probe nil anyway, so the information is worth almost nothing and the downside is the
 -- user's session. Skipped unless readSoft is passed explicitly.
-function HFB.props(ref, includeSuper, readSoft, pattern)
-    local obj = HFB.resolve(ref)
+function UEB.props(ref, includeSuper, readSoft, pattern)
+    local obj = UEB.resolve(ref)
     -- Validate the pattern once here; an invalid one thrown inside ForEachProperty is reported
     -- against the property rather than the caller's argument, which is confusing.
     if pattern ~= nil then
         local okPat = pcall(string.match, "probe", pattern)
         if not okPat then error("invalid Lua pattern: " .. tostring(pattern)) end
     end
-    -- Defaults to false. A full super-chain walk on a live actor has crashed the game with a null
+    -- Defaults to false. A full super-chain walk on a live actor has crashed a game with a null
     -- dereference inside UE4SS's own property reader, which no pcall can catch.
     if includeSuper == nil then includeSuper = false end
     local out, seen = {}, {}
@@ -307,8 +346,8 @@ function HFB.props(ref, includeSuper, readSoft, pattern)
 end
 
 -- Reflected UFunctions on the object's class chain.
-function HFB.funcs(ref)
-    local obj = HFB.resolve(ref)
+function UEB.funcs(ref)
+    local obj = UEB.resolve(ref)
     local out, seen = {}, {}
     local cls = obj:GetClass()
     while cls and cls:IsValid() do
@@ -362,16 +401,23 @@ local function requireProperty(obj, name)
     error("no property '" .. name .. "' on " .. cname .. "; inspect_object lists the ones it has")
 end
 
-function HFB.get(ref, prop)
-    local obj = HFB.resolve(ref)
+local function requireWrites(what)
+    if not SETTINGS.allow_writes then
+        error(what .. " refused: allow_writes = false in " .. MOD_NAME .. "/settings.lua")
+    end
+end
+
+function UEB.get(ref, prop)
+    local obj = UEB.resolve(ref)
     requireProperty(obj, prop)
     return obj[prop]
 end
 
 -- Returns { previous, current }. Writes are never undone, so handing back the prior value is what
 -- makes a restore possible without a separate read first.
-function HFB.set(ref, prop, value)
-    local obj = HFB.resolve(ref)
+function UEB.set(ref, prop, value)
+    requireWrites("set")
+    local obj = UEB.resolve(ref)
     requireProperty(obj, prop)
     local okPrev, prev = pcall(function() return obj[prop] end)
     local out = {}
@@ -385,15 +431,16 @@ function HFB.set(ref, prop, value)
     return out
 end
 
-function HFB.call(ref, fname, args)
-    local obj = HFB.resolve(ref)
+function UEB.call(ref, fname, args)
+    requireWrites("call")
+    local obj = UEB.resolve(ref)
     local fn = obj[fname]
     if fn == nil then error("no function " .. fname .. " on " .. obj:GetFullName()) end
     return fn(obj, table.unpack(args or {}))
 end
 
 -- Live instances of a short class name.
-function HFB.objects(className, limit)
+function UEB.objects(className, limit)
     limit = limit or 100
     local found = FindAllOf(className) or {}
     local out = {}
@@ -405,7 +452,7 @@ function HFB.objects(className, limit)
 end
 
 -- Loaded reflected types (Class, BlueprintGeneratedClass, ScriptStruct, Enum) matching a pattern.
-function HFB.types(pattern, limit)
+function UEB.types(pattern, limit)
     limit = limit or 200
     local out, total = {}, 0
     ForEachUObject(function(obj)
@@ -424,7 +471,8 @@ function HFB.types(pattern, limit)
     return { count = total, types = out }
 end
 
-function HFB.console(cmd)
+function UEB.console(cmd)
+    requireWrites("console")
     local pc = UEHelpers.GetPlayerController()
     local world = UEHelpers.GetWorld()
     local ksl = UEHelpers.GetKismetSystemLibrary()
@@ -439,7 +487,7 @@ function HFB.console(cmd)
     error("no world or player controller to run a console command in")
 end
 
-function HFB.world()
+function UEB.world()
     local pc = FindFirstOf("PlayerController")
     local out = {}
     if pc and pc:IsValid() then
@@ -456,6 +504,15 @@ function HFB.world()
     return out
 end
 
+-- What the server needs to know about this end before it does anything else.
+function UEB.hello()
+    return {
+        mod = MOD_NAME, version = VERSION, protocol = PROTOCOL,
+        poll_ms = POLL_MS, allow_eval = SETTINGS.allow_eval, allow_writes = SETTINGS.allow_writes,
+        bridge_dir = DIR, ue4ss_dir = UE4SS_DIR,
+    }
+end
+
 local dumpers = {
     usmap = function() DumpUSMAP(true) end,
     jmap = function() DumpJMAP(true) end,
@@ -465,26 +522,37 @@ local dumpers = {
     objects = function() DumpAllObjects() end,
     static_meshes = function() DumpStaticMeshes() end,
 }
--- One round trip costs a 250 ms poll plus latency, against single-digit ms of actual work, so a
+
+function UEB.dump(kind)
+    local fn = dumpers[kind]
+    if not fn then error("unknown dump kind " .. tostring(kind)) end
+    fn()
+    return "dump " .. kind .. " written to the ue4ss directory"
+end
+
+-- One round trip costs a poll interval plus latency, against single-digit ms of actual work, so a
 -- sequence of small calls is nearly all waiting. Batch runs them in one request. Each entry is
--- pcall-fenced so one failure does not lose the results either side of it.
+-- pcall-fenced so one failure does not lose the results either side of it. This is also the
+-- structured surface that stays available when allow_eval is off.
 local BATCH_OPS = {
-    world   = function(a) return HFB.world() end,
-    get     = function(a) return HFB.get(a.ref, a.name) end,
-    set     = function(a) return HFB.set(a.ref, a.name, a.value) end,
-    call    = function(a) return HFB.call(a.ref, a["function"], a.args) end,
-    props   = function(a) return HFB.props(a.ref, a.include_super, a.read_soft, a.pattern) end,
-    funcs   = function(a) return HFB.funcs(a.ref) end,
-    objects = function(a) return HFB.objects(a.class_name, a.limit) end,
-    types   = function(a) return HFB.types(a.pattern, a.limit) end,
-    console = function(a) return HFB.console(a.command) end,
+    hello   = function(a) return UEB.hello() end,
+    world   = function(a) return UEB.world() end,
+    get     = function(a) return UEB.get(a.ref, a.name) end,
+    set     = function(a) return UEB.set(a.ref, a.name, a.value) end,
+    call    = function(a) return UEB.call(a.ref, a["function"], a.args) end,
+    props   = function(a) return UEB.props(a.ref, a.include_super, a.read_soft, a.pattern) end,
+    funcs   = function(a) return UEB.funcs(a.ref) end,
+    objects = function(a) return UEB.objects(a.class_name, a.limit) end,
+    types   = function(a) return UEB.types(a.pattern, a.limit) end,
+    console = function(a) return UEB.console(a.command) end,
+    dump    = function(a) return UEB.dump(a.kind) end,
     find    = function(a)
-        local o = HFB.resolve(a.ref)
+        local o = UEB.resolve(a.ref)
         return { object = o:GetFullName(), class = o:GetClass():GetFullName(), address = o:GetAddress() }
     end,
 }
 
-function HFB.batch(calls)
+function UEB.batch(calls)
     if type(calls) ~= "table" then error("batch expects a list of calls") end
     local out = {}
     for i, c in ipairs(calls) do
@@ -498,18 +566,11 @@ function HFB.batch(calls)
         else
             trace("batch[" .. i .. "] " .. op)
             local ok, res = pcall(fn, c)
-            if ok then out[i] = { op = op, ok = true, result = res }
+            if ok then out[i] = { op = op, ok = true, result = encodeValue(res, 1) }
             else out[i] = { op = op, ok = false, error = tostring(res) } end
         end
     end
     return out
-end
-
-function HFB.dump(kind)
-    local fn = dumpers[kind]
-    if not fn then error("unknown dump kind " .. tostring(kind)) end
-    fn()
-    return "dump " .. kind .. " written to the ue4ss directory"
 end
 
 -- Request handling -----------------------------------------------------------------------
@@ -538,7 +599,7 @@ local handled = 0
 local function respond(id, ok, result, output, err, started)
     local body = json.encode({
         id = id, ok = ok, result = result, output = output, error = err,
-        ms = math.floor((os.clock() - started) * 1000),
+        ms = math.floor((os.clock() - started) * 1000), protocol = PROTOCOL,
     })
     local wrote, werr = writeAtomic(RESPONSE, RESPONSE_TMP, body)
     if not wrote then log("response write failed: %s", tostring(werr)) end
@@ -551,8 +612,35 @@ local function handle(req)
         respond(req.id, true, { pong = true, handled = handled, poll_ms = POLL_MS }, {}, nil, started)
         return
     end
+    if req.op == "hello" then
+        local info = UEB.hello()
+        info.handled = handled
+        respond(req.id, true, info, {}, nil, started)
+        return
+    end
+    if req.op == "batch" then
+        if type(req.calls) ~= "table" then
+            respond(req.id, false, nil, {}, "batch needs a 'calls' list", started)
+            return
+        end
+        busy = true
+        trace("batch id=" .. tostring(req.id) .. " (" .. #req.calls .. " calls)")
+        ExecuteInGameThread(function()
+            local ok, result = pcall(UEB.batch, req.calls)
+            trace("idle after id=" .. tostring(req.id))
+            if ok then respond(req.id, true, result, {}, nil, started)
+            else respond(req.id, false, nil, {}, tostring(result), started) end
+            busy = false
+        end)
+        return
+    end
     if req.op ~= "eval" or type(req.code) ~= "string" then
         respond(req.id, false, nil, {}, "unknown op or missing code", started)
+        return
+    end
+    if not SETTINGS.allow_eval then
+        respond(req.id, false, nil, {},
+            "eval refused: allow_eval = false in " .. MOD_NAME .. "/settings.lua (batch ops still work)", started)
         return
     end
     busy = true
@@ -566,19 +654,23 @@ local function handle(req)
     end)
 end
 
--- Reload this file in place without restarting the game: HFB.reload() from any bridge eval.
+-- Reload this file in place without restarting the game: UEB.reload() from any bridge eval.
 -- Each load bumps the generation; an older poll loop sees the bump and retires, so only one
 -- loop ever reads the request file.
-local MOD_PATH = "ue4ss/Mods/HFBridge/scripts/main.lua"   -- relative to Binaries\Win64
-HFB_GENERATION = (HFB_GENERATION or 0) + 1
-local myGeneration = HFB_GENERATION
-function HFB.reload()
+UEB_GENERATION = (UEB_GENERATION or 0) + 1
+local myGeneration = UEB_GENERATION
+function UEB.reload()
     dofile(MOD_PATH)
-    return "reloaded, generation " .. tostring(HFB_GENERATION)
+    return "reloaded, generation " .. tostring(UEB_GENERATION)
+end
+
+if not SETTINGS.enabled then
+    log("disabled by settings.lua (enabled = false); not polling")
+    return
 end
 
 LoopAsync(POLL_MS, function()
-    if myGeneration ~= HFB_GENERATION then return true end
+    if myGeneration ~= UEB_GENERATION then return true end
     if busy then return false end
     local raw = readFile(REQUEST)
     if not raw then return false end
@@ -596,4 +688,6 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-log("ready (generation %d), polling %s every %d ms", myGeneration, REQUEST, POLL_MS)
+log("v%s ready (protocol %d, generation %d), polling %s every %d ms; eval=%s writes=%s",
+    VERSION, PROTOCOL, myGeneration, REQUEST, POLL_MS,
+    tostring(SETTINGS.allow_eval), tostring(SETTINGS.allow_writes))

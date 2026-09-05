@@ -1,4 +1,4 @@
--- Minimal JSON encode/decode for HFBridge. Pure Lua 5.4, no dependencies.
+-- Minimal JSON encode/decode for UEBridge. Pure Lua 5.4, no dependencies.
 -- Encodes: nil, boolean, number, string, table (array if keys are 1..n, else object).
 -- Non-finite numbers encode as null. Decodes the full JSON grammar including \uXXXX.
 
