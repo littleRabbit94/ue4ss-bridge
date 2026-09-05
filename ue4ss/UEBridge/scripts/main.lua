@@ -47,15 +47,22 @@ local function log(fmt, ...)
 end
 
 -- Settings ----------------------------------------------------------------------------------
--- settings.lua beside the scripts folder is optional and user-editable; every key has a default.
+-- scripts\settings.lua is optional and user-editable; every key has a default.
 --   enabled       false turns the bridge off without removing the mod.
 --   poll_ms       how often the request file is checked.
 --   allow_eval    false refuses raw Lua ("eval"); the structured "batch" ops still work.
 --   allow_writes  false refuses anything that changes state: set, call, console, and eval.
 --   bridge_dir    override the request/response folder (absolute path).
+--
+-- It sits inside scripts\ rather than at the mod root because a mod manager that deploys the Lua
+-- surface by copying <mod>\scripts leaves a root-level file behind, and the bridge then runs on
+-- its defaults with the user's edited file never read. modman does exactly this, which is how
+-- the file spent its first days not being live (found 2026-09-05). The mod root is still checked
+-- first, so an install that already keeps one there is unaffected.
 local SETTINGS = { enabled = true, poll_ms = 250, allow_eval = true, allow_writes = true, bridge_dir = nil }
 do
     local chunk = loadfile(MOD_DIR .. "\\settings.lua")
+                  or loadfile(MOD_DIR .. "\\scripts\\settings.lua")
     if chunk then
         local ok, user = pcall(chunk)
         if ok and type(user) == "table" then
@@ -403,7 +410,7 @@ end
 
 local function requireWrites(what)
     if not SETTINGS.allow_writes then
-        error(what .. " refused: allow_writes = false in " .. MOD_NAME .. "/settings.lua")
+        error(what .. " refused: allow_writes = false in " .. MOD_NAME .. "/scripts/settings.lua")
     end
 end
 
@@ -640,7 +647,7 @@ local function handle(req)
     end
     if not SETTINGS.allow_eval then
         respond(req.id, false, nil, {},
-            "eval refused: allow_eval = false in " .. MOD_NAME .. "/settings.lua (batch ops still work)", started)
+            "eval refused: allow_eval = false in " .. MOD_NAME .. "/scripts/settings.lua (batch ops still work)", started)
         return
     end
     busy = true
@@ -665,7 +672,7 @@ function UEB.reload()
 end
 
 if not SETTINGS.enabled then
-    log("disabled by settings.lua (enabled = false); not polling")
+    log("disabled by scripts/settings.lua (enabled = false); not polling")
     return
 end
 

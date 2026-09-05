@@ -24,7 +24,7 @@ Extract the release zip into the game's install folder. It carries the path, so 
 `<game>\<Project>\Binaries\Win64\ue4ss\Mods\UEBridge`. `enabled.txt` in that folder starts the
 mod; **no `mods.txt` edit**. `UE4SS.log` shows `[UEBridge] v1.0.0 ready` when it loaded.
 
-`settings.lua` in the mod folder:
+`scripts\settings.lua` in the mod folder:
 
 | Key | Default | Effect |
 |---|---|---|
