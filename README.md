@@ -20,8 +20,9 @@ access to the game folder can talk to it.
 
 ## Install the mod
 
-Extract the release zip into the game's install folder. It carries the path, so the files land in
-`<game>\<Project>\Binaries\Win64\ue4ss\Mods\UEBridge`. `enabled.txt` in that folder starts the
+Extract the release zip into the folder that holds the `ue4ss` folder,
+`<game>\<Project>\Binaries\Win64` (the folder with the game's exe). It carries the path, so the
+files land in `ue4ss\Mods\UEBridge`. `enabled.txt` in that folder starts the
 mod; **no `mods.txt` edit**. `UE4SS.log` shows `[UEBridge] v1.0.0 ready` when it loaded.
 
 `scripts\settings.lua` in the mod folder:

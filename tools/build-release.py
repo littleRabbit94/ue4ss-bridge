@@ -32,9 +32,10 @@ computer (for example the ue-bridge MCP server, so an AI agent can help you mod)
 the running game and read the result, without a relaunch per question.
 
 INSTALL
-  Extract this archive into your game's install folder. The files land in
-  <game>\\<Project>\\Binaries\\Win64\\ue4ss\\Mods\\UEBridge on their own. UE4SS must already be
-  installed. No mods.txt edit is needed: enabled.txt in the mod folder turns it on.
+  Extract this archive into the folder that holds the ue4ss folder, which is
+  <game>\\<Project>\\Binaries\\Win64 (the folder with the game's exe). The archive carries the
+  path, so the files land in ue4ss\\Mods\\UEBridge on their own. UE4SS must already be installed.
+  No mods.txt edit is needed: enabled.txt in the mod folder turns it on.
 
   UE4SS.log will show "[UEBridge] v{version} ready" when it loaded.
 
