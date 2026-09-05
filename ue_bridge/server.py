@@ -63,12 +63,21 @@ class Game:
         return Path(os.environ.get("LOCALAPPDATA", "")) / self.project / "Saved" / "Crashes"
 
 
+def _has_ue4ss(win64: Path) -> bool:
+    return (win64 / "ue4ss").is_dir() or (win64 / "UE4SS.dll").is_file()
+
+
 def _running_ue_processes() -> list[tuple[str, str]]:
-    """(image name, full path) for every running UE shipping-style executable."""
+    """(image name, full path) for every running game that has UE4SS installed beside it.
+
+    The executable is NOT always <Project>-Win64-Shipping.exe: The Blood of Dawnwalker ships as
+    Binaries\\Win64\\Dawnwalker.exe. What every UE4SS game has in common is the exe sitting in a
+    Binaries\\Win64 folder next to a ue4ss folder (or UE4SS.dll), so that is the test.
+    """
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*-Win64-*.exe' } | "
+             "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*\\Binaries\\Win64\\*.exe' } | "
              "ForEach-Object { $_.Name + '|' + $_.ExecutablePath }"],
             capture_output=True, text=True, timeout=15,
         ).stdout
@@ -77,7 +86,10 @@ def _running_ue_processes() -> list[tuple[str, str]]:
     found = []
     for line in out.splitlines():
         name, _, path = line.strip().partition("|")
-        if name.endswith(SHIPPING_SUFFIXES) and path:
+        if not path:
+            continue
+        exe = Path(path)
+        if exe.parent.name == "Win64" and exe.parent.parent.name == "Binaries" and _has_ue4ss(exe.parent):
             found.append((name, path))
     return found
 
