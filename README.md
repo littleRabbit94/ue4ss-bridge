@@ -1,7 +1,7 @@
 # ue-bridge
 
-Run Lua inside a live [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) game from outside it. Two
-parts, released separately:
+Talk to a running [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) game: inspect objects, call
+functions, run Lua, while it plays. Two parts, released separately:
 
 | Part | What | Where it goes |
 |---|---|---|

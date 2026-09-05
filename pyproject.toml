@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ue-bridge"
 version = "1.0.0"
-description = "Run Lua inside a live UE4SS game from outside it: an MCP server and CLI for the UEBridge mod."
+description = "Talk to a running UE4SS game: inspect objects, call functions, run Lua, while it plays. An MCP server and CLI plus the UEBridge mod."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
