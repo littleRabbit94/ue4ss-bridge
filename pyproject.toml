@@ -29,4 +29,4 @@ Source = "https://github.com/littleRabbit94/ue-bridge"
 packages = ["ue_bridge"]
 
 [tool.hatch.build.targets.sdist]
-include = ["ue_bridge", "ue4ss", "README.md", "LICENSE"]
+include = ["ue_bridge", "ue4ss", "README.md", "CHANGELOG.md", "LICENSE"]
