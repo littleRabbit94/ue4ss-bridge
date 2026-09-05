@@ -23,7 +23,7 @@ dependencies = ["mcp>=1.8,<2"]
 ue-bridge = "ue_bridge.server:main"
 
 [project.urls]
-Source = "https://github.com/Rabbit-modding/ue-bridge"
+Source = "https://github.com/littleRabbit94/ue-bridge"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ue_bridge"]
