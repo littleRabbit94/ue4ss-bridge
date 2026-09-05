@@ -5,7 +5,7 @@ functions, run Lua, while it plays. Two parts, released separately:
 
 | Part | What | Where it goes |
 |---|---|---|
-| **UEBridge** (Lua mod) | Polls `ue4ss\bridge\request.json`, runs the request on the game thread, writes `response.json`. Game-agnostic. | The game: `ue4ss\Mods\UEBridge\` (Nexus / GitHub release zip) |
+| **UEBridge** (Lua mod) | Polls `ue4ss\bridge\request.json`, runs the request on the game thread, writes `response.json`. Game-agnostic. | The game: `ue4ss\Mods\UEBridge\` ([GitHub release](https://github.com/littleRabbit94/ue-bridge/releases) or [Nexus](https://www.nexusmods.com/thelanternofthelaughlesssaint/mods/5)) |
 | **ue-bridge** (Python) | An MCP server and CLI that write those files and read the answers. Finds the running game by itself. | Your machine: `uvx ue-bridge` or `pip install ue-bridge` |
 
 ```
