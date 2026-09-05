@@ -36,8 +36,9 @@ mod; **no `mods.txt` edit**. `UE4SS.log` shows `[UEBridge] v1.0.0 ready` when it
 
 ## Install the server and point an agent at it
 
-Any MCP client works. The server finds the running `*-Win64-Shipping.exe`, so no path needs
-configuring; pass `--game-dir` or set `UE_BRIDGE_GAME_DIR` to pin one.
+Any MCP client works. The server finds the running game (an exe in a `Binaries\Win64` folder with
+`ue4ss\` beside it), so no path needs configuring; pass `--game-dir` or set `UE_BRIDGE_GAME_DIR` to
+pin one.
 
 **stdio** (Claude Code, Claude Desktop, Cursor, Windsurf, Codex, Continue, ...):
 

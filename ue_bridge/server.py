@@ -3,8 +3,7 @@
 Transport is two files in <game>\\Binaries\\Win64\\ue4ss\\bridge\\ (request.json / response.json).
 The Lua mod polls the request file, runs the request on the game thread, and writes the response.
 Nothing here needs sockets or admin rights, and nothing here names a particular game: the game is
-found by looking for a running *-Win64-Shipping.exe (or -Win64-Test / -Win64-Debug) and reading
-its path.
+found by looking for a running exe in a Binaries\\Win64 folder that has ue4ss\\ beside it.
 
 Run as an MCP server (stdio):   ue-bridge                (or: python -m ue_bridge)
 Run as an MCP server (HTTP):    ue-bridge --http [--port 8930]
@@ -35,8 +34,7 @@ from . import __version__
 
 PROTOCOL = 1
 DEFAULT_TIMEOUT = 15.0
-# A request.json older than this that nobody consumed is a leftover from a dead game, not a
-# request in flight; reclaim it instead of refusing forever.
+# An unconsumed request.json older than this is a leftover from a dead game, not a call in flight.
 STALE_REQUEST_S = 10.0
 
 SHIPPING_SUFFIXES = ("-Win64-Shipping.exe", "-Win64-Test.exe", "-Win64-Debug.exe", "-Win64-DebugGame.exe")
@@ -68,11 +66,10 @@ def _has_ue4ss(win64: Path) -> bool:
 
 
 def _running_ue_processes() -> list[tuple[str, str]]:
-    """(image name, full path) for every running game that has UE4SS installed beside it.
+    """(image name, full path) for every running exe in a Binaries\\Win64 folder with UE4SS beside it.
 
-    The executable is NOT always <Project>-Win64-Shipping.exe: The Blood of Dawnwalker ships as
-    Binaries\\Win64\\Dawnwalker.exe. What every UE4SS game has in common is the exe sitting in a
-    Binaries\\Win64 folder next to a ue4ss folder (or UE4SS.dll), so that is the test.
+    The exe name is not reliable (Dawnwalker ships as Dawnwalker.exe, not *-Win64-Shipping.exe);
+    the folder shape is.
     """
     try:
         out = subprocess.run(
@@ -89,7 +86,9 @@ def _running_ue_processes() -> list[tuple[str, str]]:
         if not path:
             continue
         exe = Path(path)
-        if exe.parent.name == "Win64" and exe.parent.parent.name == "Binaries" and _has_ue4ss(exe.parent):
+        win64 = exe.parent
+        if (win64.name == "Win64" and win64.parent.name == "Binaries"
+                and win64.parent.parent.name != "Engine" and _has_ue4ss(win64)):
             found.append((name, path))
     return found
 
@@ -106,16 +105,22 @@ def _find_win64(root: Path) -> Path | None:
     """Locate <Project>\\Binaries\\Win64 under a game root (or accept it when handed directly)."""
     if root.name == "Win64" and root.parent.name == "Binaries":
         return root
-    # A game root holds Engine\Binaries\Win64 too; the project folder is the one with the
-    # shipping executable in it.
-    cands = list(root.glob("*/Binaries/Win64")) + [root / "Binaries" / "Win64"]
-    for cand in cands:
-        if any(p.name.endswith(SHIPPING_SUFFIXES) for p in cand.glob("*-Win64-*.exe")):
+    # Engine\Binaries\Win64 holds helper exes (CrashReportClient, ...); the project folder wins.
+    cands = [c for c in list(root.glob("*/Binaries/Win64")) + [root / "Binaries" / "Win64"] if c.is_dir()]
+    project = [c for c in cands if c.parent.parent.name != "Engine"]
+    for cand in project:
+        if _has_ue4ss(cand) or _game_exe_in(cand):
             return cand
-    for cand in cands:
-        if cand.is_dir() and cand.parent.parent.name != "Engine":
-            return cand
-    return None
+    return project[0] if project else None
+
+
+def _game_exe_in(win64: Path) -> Path | None:
+    """The game exe in a Win64 folder: *-Win64-<Config>.exe, else <ProjectFolder>.exe."""
+    for p in win64.glob("*-Win64-*.exe"):
+        if p.name.endswith(SHIPPING_SUFFIXES):
+            return p
+    named = win64 / f"{win64.parent.parent.name}.exe"
+    return named if named.is_file() else None
 
 
 def locate_game(game_dir: str | None = None) -> Game:
@@ -126,8 +131,7 @@ def locate_game(game_dir: str | None = None) -> Game:
         win64 = _find_win64(Path(game_dir))
         if not win64:
             raise BridgeError(f"no <Project>\\Binaries\\Win64 folder under {game_dir}")
-        exes = [p for p in win64.glob("*-Win64-*.exe") if p.name.endswith(SHIPPING_SUFFIXES)]
-        exe = exes[0] if exes else None
+        exe = _game_exe_in(win64)
         bridge = Path(data_dir) if data_dir else win64 / "ue4ss" / "bridge"
         project = _project_from_exe(exe) if exe else win64.parent.parent.name
         return Game(exe=exe, process=exe.stem if exe else None, project=project, bridge_dir=bridge)
@@ -151,27 +155,43 @@ _GAME: Game | None = None
 _GAME_DIR_ARG: str | None = None
 
 
+def _pinned() -> bool:
+    return bool(_GAME_DIR_ARG or os.environ.get("UE_BRIDGE_GAME_DIR") or os.environ.get("UE_BRIDGE_DATA_DIR"))
+
+
 def game() -> Game:
-    """The located game, re-discovered when nothing is known yet or the process went away."""
+    """The located game. Cached; a process-discovered game is re-discovered once it is gone."""
     global _GAME
-    if _GAME is None or (_GAME.process is None and not os.environ.get("UE_BRIDGE_DATA_DIR")):
+    if _GAME is None or (_GAME.process is None and not _pinned()):
         _GAME = locate_game(_GAME_DIR_ARG)
     return _GAME
 
 
+def _process_running(image: str) -> bool:
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image}.exe", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:
+        return False
+    # CSV keeps the full image name (the table format truncates at 25 chars). First field is the name.
+    return any(line.startswith(f'"{image}.exe"') for line in out.splitlines())
+
+
 def game_running() -> bool:
+    global _GAME
     g = game()
-    if g.process:
+    if g.process and _process_running(g.process):
+        return True
+    if not _pinned():
+        # Another game may have been started since discovery.
+        _GAME = None
         try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {g.process}.exe", "/NH", "/FO", "CSV"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-        except Exception:
+            return game().process is not None
+        except BridgeError:
             return False
-        # Table output truncates image names to 25 characters; CSV keeps the full name.
-        return g.process in out
-    return bool(_running_ue_processes())
+    return False
 
 
 # --- Crash forensics ------------------------------------------------------------------------
@@ -197,7 +217,6 @@ def _crash_since(started: float) -> dict | None:
     if not folders:
         return None
     newest = max(folders, key=lambda d: d.stat().st_mtime)
-    # Slack: the report is written as the process dies, moments after the call went out.
     if newest.stat().st_mtime < started - 5:
         return None
     info: dict[str, Any] = {"report": str(newest)}
@@ -213,7 +232,6 @@ def _crash_since(started: float) -> dict | None:
 
 
 def _crash_report(started: float) -> str:
-    """Explain a vanished game concretely instead of guessing 'blocked or long-running'."""
     lines = ["the game crashed during this call (the process is gone)."]
     op = _last_op()
     if op:
@@ -238,7 +256,7 @@ def request(op: str, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> dict:
     tmp_path = bridge_dir / "request.tmp"
     res_path = bridge_dir / "response.json"
 
-    res_path.unlink(missing_ok=True)  # a stale response from a timed-out call
+    res_path.unlink(missing_ok=True)  # stale response from a timed-out call
     if req_path.exists():
         age = time.time() - req_path.stat().st_mtime
         if age < STALE_REQUEST_S:
@@ -246,7 +264,7 @@ def request(op: str, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> dict:
                 f"a request.json written {age:.1f}s ago is still unconsumed: another client is "
                 "mid-call, or the game is not polling. Retry in a moment."
             )
-        req_path.unlink(missing_ok=True)  # leftover from a game that died mid-request
+        req_path.unlink(missing_ok=True)
 
     rid = uuid.uuid4().hex[:12]
     body = {"id": rid, "op": op, **fields}
@@ -280,8 +298,6 @@ def request(op: str, timeout: float = DEFAULT_TIMEOUT, **fields: Any) -> dict:
                 f"Bridge folder: {bridge_dir}"
             )
         raise BridgeError("request never picked up: the game is not running.")
-    # Picked up, no answer. Overwhelmingly this means the request took the process down, so say so
-    # rather than making the caller guess between a crash and a loading screen.
     if not game_running():
         raise BridgeError(_crash_report(started_wall))
     op_line = _last_op()
@@ -486,6 +502,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 # --- CLI ------------------------------------------------------------------------------------
 
 def _cli(cmd: str, rest: list[str]) -> int:
+    def arg(i: int, what: str) -> str:
+        if len(rest) <= i:
+            raise BridgeError(f"{cmd} needs {what}")
+        return rest[i]
+
     try:
         if cmd == "ping":
             t0 = time.monotonic()
@@ -501,11 +522,11 @@ def _cli(cmd: str, rest: list[str]) -> int:
         elif cmd == "world":
             print(json.dumps(one("world"), indent=1))
         elif cmd == "props":
-            print(json.dumps(one("props", 30, ref=rest[0]), indent=1))
+            print(json.dumps(one("props", 30, ref=arg(0, "an object reference")), indent=1))
         elif cmd == "funcs":
-            print(json.dumps(one("funcs", ref=rest[0]), indent=1))
+            print(json.dumps(one("funcs", ref=arg(0, "an object reference")), indent=1))
         elif cmd == "objects":
-            print(json.dumps(one("objects", class_name=rest[0]), indent=1))
+            print(json.dumps(one("objects", class_name=arg(0, "a class name")), indent=1))
         elif cmd == "types":
             print(json.dumps(one("types", 30, pattern=rest[0] if rest else None), indent=1))
         elif cmd == "console":
@@ -540,8 +561,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if ns.command:
         return _cli(ns.command, ns.args)
-    server = build_server(port=ns.port)
-    # Loopback only. The bridge executes Lua inside the game; nothing off this machine should reach it.
+    server = build_server(port=ns.port)  # loopback only: the bridge executes Lua inside the game
     server.run(transport="streamable-http" if ns.http else "stdio")
     return 0
 

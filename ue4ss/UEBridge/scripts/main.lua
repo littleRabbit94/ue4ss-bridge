@@ -53,12 +53,8 @@ end
 --   allow_eval    false refuses raw Lua ("eval"); the structured "batch" ops still work.
 --   allow_writes  false refuses anything that changes state: set, call, console, and eval.
 --   bridge_dir    override the request/response folder (absolute path).
---
--- It sits inside scripts\ rather than at the mod root because a mod manager that deploys the Lua
--- surface by copying <mod>\scripts leaves a root-level file behind, and the bridge then runs on
--- its defaults with the user's edited file never read. modman does exactly this, which is how
--- the file spent its first days not being live (found 2026-09-05). The mod root is still checked
--- first, so an install that already keeps one there is unaffected.
+-- The file lives in scripts\ because mod managers that deploy only <mod>\scripts would otherwise
+-- drop it. A copy at the mod root is still honoured first.
 local SETTINGS = { enabled = true, poll_ms = 250, allow_eval = true, allow_writes = true, bridge_dir = nil }
 do
     local chunk = loadfile(MOD_DIR .. "\\settings.lua")
@@ -80,20 +76,17 @@ local DIR = SETTINGS.bridge_dir or (UE4SS_DIR .. "\\bridge")
 local REQUEST = DIR .. "/request.json"
 local RESPONSE = DIR .. "/response.json"
 local RESPONSE_TMP = DIR .. "/response.tmp"
-local POLL_MS = tonumber(SETTINGS.poll_ms) or 250
+local POLL_MS = math.max(50, tonumber(SETTINGS.poll_ms) or 250)
 
--- A crash inside UE4SS's native code takes the process down mid-request and no pcall can catch
--- it, so the only way to learn what was in flight is to have written it to disk already. Keep ONE
--- line, rewritten in place and flushed, naming the current operation. The server reads it after
--- a timeout to report what killed the game instead of guessing "blocked or long-running".
+-- One line, rewritten in place and flushed, naming the operation in flight. A native crash cannot
+-- be caught by pcall; the server reads this after a timeout to report what was running.
 local TRACE = DIR .. "/lastop.log"
 local traceHandle, traceOpened = nil, false
 local function trace(s)
     if not traceOpened then traceHandle = io.open(TRACE, "wb") traceOpened = true end
     if not traceHandle then return end
     traceHandle:seek("set", 0)
-    -- Pad so a short line never leaves the tail of a longer one behind it.
-    -- Lua's string.format caps a field width at two digits, so %-300s is rejected. Pad by hand.
+    -- Pad to a fixed width so a short line overwrites a longer one. (%-300s exceeds format's width cap.)
     local line = tostring(s):sub(1, 300)
     traceHandle:write(line .. string.rep(" ", 300 - #line))
     traceHandle:flush()
@@ -122,9 +115,7 @@ end
 
 -- Value serialisation --------------------------------------------------------------------
 
--- 6, not 4: a batch nests each result two levels below the response root, and at 4 the property
--- VALUES inside a batched props call encoded as "<depth>". Scalars are returned before the depth
--- check, so only object and struct values were affected, which made the truncation easy to miss.
+-- A batched props result nests values two levels deeper than a direct one; 6 keeps them intact.
 local MAX_DEPTH = 6
 local MAX_ITEMS = 200
 
@@ -156,15 +147,13 @@ end
 
 local UNSAFE_TYPES = { SoftObjectProperty = true, SoftClassProperty = true }
 
--- Fallback only, for a struct whose type will not resolve. This list used to be the ONLY way
--- fields were found, so anything not named here was invisible.
+-- Probe list for a struct whose type does not resolve.
 local STRUCT_FIELDS = { "X", "Y", "Z", "W", "Pitch", "Yaw", "Roll", "R", "G", "B", "A",
                         "Min", "Max", "AssetPath", "SubPathString", "PackageName", "AssetName",
                         "TagName", "Value", "Guid", "B", "C", "D", "Key" }
 
--- A struct value's GetFullName() reports its TYPE, e.g. "ScriptStruct /Script/CoreUObject.Vector",
--- and that path resolves to a UScriptStruct whose properties walk like any class. Cached, since the
--- lookup repeats for every value of the same type in a dump.
+-- A struct value's GetFullName() names its type ("ScriptStruct /Script/CoreUObject.Vector"); that
+-- path resolves to a UScriptStruct whose properties walk like a class. Cached per type.
 local STRUCT_TYPE_CACHE = {}
 
 local function structType(s)
@@ -206,9 +195,7 @@ local function encodeStruct(s, depth)
         end
         return out
     end
-    -- Structs inherit, exactly like classes: FVector_NetQuantize100 declares nothing of its own and
-    -- gets X/Y/Z from FVector, FActorTickFunction gets 7 fields from FTickFunction. Walking only
-    -- the leaf reported those as empty.
+    -- Walk the super chain: FVector_NetQuantize100 declares nothing itself and inherits X/Y/Z.
     local seen = {}
     while st and st:IsValid() do
         st:ForEachProperty(function(prop)
@@ -273,7 +260,6 @@ end
 -- Helper library exposed to eval snippets as UEB -------------------------------------------
 
 UEB = {}
-HFB = UEB   -- older snippets written against the HFBridge name keep working
 UEB.encode = encodeValue
 UEB.trace = trace
 UEB.version = VERSION
@@ -303,21 +289,16 @@ function UEB.resolve(ref)
     return o
 end
 
--- All reflected properties of an object, walking the super chain. Returns {name, type, value}.
--- Reading a SoftObjectProperty has hard-crashed a game (null dereference inside UE4SS's own
--- property reader, uncatchable by pcall). Most soft reads are harmless and yield a wrapper whose
--- fields all probe nil anyway, so the information is worth almost nothing and the downside is the
--- user's session. Skipped unless readSoft is passed explicitly.
+-- Reflected properties of an object as {name, type, value}. includeSuper defaults to false.
+-- SoftObject/SoftClass reads are skipped unless readSoft: they have crashed the process inside
+-- UE4SS's property reader, which no pcall can catch.
 function UEB.props(ref, includeSuper, readSoft, pattern)
     local obj = UEB.resolve(ref)
-    -- Validate the pattern once here; an invalid one thrown inside ForEachProperty is reported
-    -- against the property rather than the caller's argument, which is confusing.
     if pattern ~= nil then
+        -- Validate here so a bad pattern is reported against the argument, not a property.
         local okPat = pcall(string.match, "probe", pattern)
         if not okPat then error("invalid Lua pattern: " .. tostring(pattern)) end
     end
-    -- Defaults to false. A full super-chain walk on a live actor has crashed a game with a null
-    -- dereference inside UE4SS's own property reader, which no pcall can catch.
     if includeSuper == nil then includeSuper = false end
     local out, seen = {}, {}
     local cls = obj:GetClass()
@@ -326,12 +307,11 @@ function UEB.props(ref, includeSuper, readSoft, pattern)
         cls:ForEachProperty(function(prop)
             local name = prop:GetFName():ToString()
             if not seen[name] then
-                seen[name] = true          -- dedupe across the chain even when filtered out
+                seen[name] = true
                 if pattern and not name:match(pattern) then return end
                 local ptype = safe(function() return prop:GetClass():GetFName():ToString() end)
                 trace("props " .. tostring(cname) .. "." .. name .. " (" .. tostring(ptype) .. ")")
-                -- Branch explicitly. The `ok and encode(val) or "<error>"` idiom misreports
-                -- every property that encodes to false or nil, because the and-branch is falsy.
+                -- Explicit branches: `ok and x or y` misreports values that encode to false/nil.
                 local encoded
                 if UNSAFE_TYPES[ptype] and not readSoft then
                     encoded = "<skipped: " .. ptype .. ">"
@@ -371,9 +351,8 @@ function UEB.funcs(ref)
     return out
 end
 
--- UE4SS hands back a bogus "<invalid>" UObject for a name the class does not declare, instead of
--- failing. A typo therefore reads back as something that looks like data, and a WRITE silently does
--- nothing while reporting success. Both are checked against the reflection first.
+-- UE4SS returns an "<invalid>" object for an undeclared property name and silently ignores writes
+-- to one, so get/set check the reflection first.
 local function declaresProperty(cls, name)
     while cls and cls:IsValid() do
         local found = false
@@ -420,8 +399,7 @@ function UEB.get(ref, prop)
     return obj[prop]
 end
 
--- Returns { previous, current }. Writes are never undone, so handing back the prior value is what
--- makes a restore possible without a separate read first.
+-- Returns { previous, current }; previous is what a caller restores from.
 function UEB.set(ref, prop, value)
     requireWrites("set")
     local obj = UEB.resolve(ref)
@@ -537,10 +515,8 @@ function UEB.dump(kind)
     return "dump " .. kind .. " written to the ue4ss directory"
 end
 
--- One round trip costs a poll interval plus latency, against single-digit ms of actual work, so a
--- sequence of small calls is nearly all waiting. Batch runs them in one request. Each entry is
--- pcall-fenced so one failure does not lose the results either side of it. This is also the
--- structured surface that stays available when allow_eval is off.
+-- Several ops in one round trip, each pcall-fenced. Also the structured surface that stays
+-- available when allow_eval is off.
 local BATCH_OPS = {
     hello   = function(a) return UEB.hello() end,
     world   = function(a) return UEB.world() end,
@@ -603,6 +579,7 @@ end
 local busy = false
 local handled = 0
 
+-- ms is os.clock() CPU time, an approximation; Lua has no wall clock finer than a second.
 local function respond(id, ok, result, output, err, started)
     local body = json.encode({
         id = id, ok = ok, result = result, output = output, error = err,
@@ -654,16 +631,13 @@ local function handle(req)
     trace("eval id=" .. tostring(req.id) .. " " .. req.code:gsub("%s+", " "))
     ExecuteInGameThread(function()
         local ok, result, output, err = runEval(req.code)
-        -- Cleared only on the way out, so a crash leaves the in-flight line on disk.
         trace("idle after id=" .. tostring(req.id))
         respond(req.id, ok, result, output, err, started)
         busy = false
     end)
 end
 
--- Reload this file in place without restarting the game: UEB.reload() from any bridge eval.
--- Each load bumps the generation; an older poll loop sees the bump and retires, so only one
--- loop ever reads the request file.
+-- UEB.reload() re-runs this file in place; the generation bump retires the previous poll loop.
 UEB_GENERATION = (UEB_GENERATION or 0) + 1
 local myGeneration = UEB_GENERATION
 function UEB.reload()

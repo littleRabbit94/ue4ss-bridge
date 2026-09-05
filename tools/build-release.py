@@ -44,7 +44,7 @@ WHAT IT DOES, EXACTLY
   connection, starts no program, and downloads nothing. Only software already running on your
   computer, with write access to your game folder, can talk to it.
 
-SETTINGS (scripts\settings.lua in the mod folder)
+SETTINGS (scripts\\settings.lua in the mod folder)
   enabled       = false  turns it off without uninstalling
   allow_writes  = false  read-only: nothing can change game state through the bridge
   allow_eval    = false  refuses raw Lua; the structured inspection tools still work
@@ -82,8 +82,6 @@ def main() -> int:
     prefix = "ue4ss/Mods/UEBridge/"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(prefix + "enabled.txt", "")
-        # settings.lua is in here too: it ships inside scripts/ so a mod manager that
-        # deploys only <mod>/scripts still carries it.
         for f in sorted((MOD / "scripts").glob("*.lua")):
             z.write(f, prefix + "scripts/" + f.name)
         z.writestr(prefix + "README.txt", README.format(version=ver, source=source_url()))
