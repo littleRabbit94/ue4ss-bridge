@@ -67,7 +67,7 @@ ue-bridge eval "return UEB.world()"
 ue-bridge props first:PlayerController
 ue-bridge types ^Narrative
 ue-bridge snapshot first:PlayerController before
-ue-bridge diff first:PlayerController before
+ue-bridge diff before                       # or: diff <ref> <label> for another object
 ```
 
 ## Tools
@@ -85,8 +85,8 @@ ue-bridge diff first:PlayerController before
 | `call_function(ref, fn, args)` | Call a UFunction with positional args. |
 | `console_command(cmd)` | Run a console command. |
 | `snapshot_object(ref, label, include_super, pattern)` | Keep an `inspect_object` walk in the game under a label. Read-only. |
-| `diff_object(ref, label, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. Read-only. |
-| `list_snapshots()` | Labels held, with object path, timestamp and property count. Read-only. |
+| `diff_object(label, ref, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. `ref` defaults to the snapshot's own reference. At most 500 rows per list, with a `truncated` count when that bites. Read-only. |
+| `list_snapshots()` | Labels held, with object path, wall-clock `taken` timestamp (whole seconds since the epoch) and property count. Read-only. |
 | `forget_snapshot(label)` | Drop one snapshot, or all with `"*"`. Read-only. |
 | `batch(calls)` | Several of the above in one round trip. |
 | `dump(kind)` | UE4SS dumpers: `usmap`, `jmap`, `uht`, `cxx`, `actors`, `objects`, `static_meshes`. |
@@ -104,7 +104,9 @@ has hard-crashed a game inside UE4SS's own property reader).
 
 Snapshots live in the game process, keyed by label rather than by object address. They survive
 `UEB.reload()` and are lost when the game exits. A diff ignores object and struct addresses and
-uses the same depth and array caps as the original walk, so an unchanged object diffs empty.
+uses the same depth and array caps as the original walk, so an unchanged object diffs empty; it
+also ignores the pointer text inside a `<error: ...>` marker and inside the userdata fallback, and
+treats two NaNs as equal.
 
 ## Wire protocol (2)
 

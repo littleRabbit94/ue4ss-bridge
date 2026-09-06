@@ -227,18 +227,32 @@ function encodeValue(v, depth)
     if depth > MAX_DEPTH then return "<depth>" end
     if tv == "table" then
         local out = {}
-        local n = 0
-        for k, val in pairs(v) do
-            n = n + 1
-            if n > MAX_ITEMS then out["<more>"] = true; break end
-            out[type(k) == "number" and k or tostring(k)] = encodeValue(val, depth + 1)
+        local keys, n = {}, 0
+        for k in pairs(v) do n = n + 1; keys[n] = k end
+        if n > MAX_ITEMS then
+            -- pairs() order is not stable across walks, so an unsorted truncation would keep a
+            -- different subset each time and diff against itself. Sort so the kept subset is fixed.
+            table.sort(keys, function(a, b)
+                local ta, tb = type(a), type(b)
+                if ta ~= tb then return ta < tb end
+                if ta == "number" or ta == "string" then return a < b end
+                return tostring(a) < tostring(b)
+            end)
         end
+        for i = 1, math.min(n, MAX_ITEMS) do
+            local k = keys[i]
+            out[type(k) == "number" and k or tostring(k)] = encodeValue(v[k], depth + 1)
+        end
+        if n > MAX_ITEMS then out["<more>"] = true end
         return out
     end
     if tv == "userdata" then
         local kind = safe(function() return v:type() end)
         if kind == "FName" or kind == "FString" or kind == "FText" then
-            return safe(function() return v:ToString() end) or tostring(v)
+            -- A failed ToString leaves only a description of the value. tostring(v) would embed a
+            -- fresh pointer on every walk and make an unchanged object diff non-empty, so use a
+            -- stable marker instead.
+            return safe(function() return v:ToString() end) or ("<" .. kind .. ">")
         end
         if kind == "TArray" then return encodeArray(v, depth) end
         if kind == "UScriptStruct" then return encodeStruct(v, depth) end
@@ -356,13 +370,25 @@ local function joinPath(base, k)
     return base .. "." .. tostring(k)
 end
 
+-- Scalars that count as unchanged even though `==` disagrees:
+--   NaN, which is never equal to itself;
+--   two "<error: ...>" read markers, whose text embeds a fresh pointer on each walk.
+local function scalarEqual(a, b)
+    if a == b then return true end
+    local ta, tb = type(a), type(b)
+    if ta ~= tb then return false end
+    if ta == "number" then return a ~= a and b ~= b end
+    if ta == "string" then return a:sub(1, 7) == "<error:" and b:sub(1, 7) == "<error:" end
+    return false
+end
+
 local diffValue
 
 -- Appends {path, before, after} rows into out.changed / out.added / out.removed.
 diffValue = function(path, before, after, out)
     local tb, ta = type(before), type(after)
     if tb ~= "table" or ta ~= "table" then
-        if tb ~= ta or before ~= after then
+        if tb ~= ta or not scalarEqual(before, after) then
             out.changed[#out.changed + 1] = { path = path, before = before, after = after }
         end
         return
@@ -370,6 +396,14 @@ diffValue = function(path, before, after, out)
     if before.__object ~= nil or after.__object ~= nil then
         if tostring(before.__object) ~= tostring(after.__object) then
             out.changed[#out.changed + 1] = { path = path, before = before.__object, after = after.__object }
+        end
+        return
+    end
+    -- The userdata fallback is { __type = kind, str = tostring(v) }. Its `str` is descriptive, kept
+    -- for inspect_object, and carries a fresh pointer each walk, so only the kind is compared.
+    if before.__type ~= nil and before.str ~= nil and after.__type ~= nil and after.str ~= nil then
+        if tostring(before.__type) ~= tostring(after.__type) then
+            out.changed[#out.changed + 1] = { path = path, before = before.__type, after = after.__type }
         end
         return
     end
@@ -417,7 +451,7 @@ function UEB.snapshot(ref, label, includeSuper, pattern)
     if includeSuper == nil then includeSuper = false end
     local walk = UEB.props(ref, includeSuper, false, pattern)
     local props, count = propIndex(walk)
-    local taken = os.clock()
+    local taken = os.time()   -- wall clock, whole seconds since the epoch
     UEB_SNAPSHOTS[label] = {
         label = label, path = walk.object, class = walk.class, taken = taken, count = count,
         options = { ref = ref, include_super = includeSuper, pattern = pattern },
@@ -426,7 +460,26 @@ function UEB.snapshot(ref, label, includeSuper, pattern)
     return { label = label, path = walk.object, count = count, taken = taken }
 end
 
+-- A diff result is returned as-is (see PREENCODED_OPS), so nothing downstream trims its row lists.
+-- Cap them here, and only here, so each list always serialises as a JSON list and never grows a
+-- "<more>" string key.
+local MAX_DIFF_ROWS = 500
+
+local function capRows(out)
+    local dropped = nil
+    for _, key in ipairs({ "changed", "added", "removed" }) do
+        local rows = out[key]
+        if #rows > MAX_DIFF_ROWS then
+            dropped = dropped or {}
+            dropped[key] = #rows - MAX_DIFF_ROWS
+            for i = #rows, MAX_DIFF_ROWS + 1, -1 do rows[i] = nil end
+        end
+    end
+    out.truncated = dropped
+end
+
 -- Re-walk with the options the snapshot was taken with and compare against it.
+-- ref = nil re-uses the reference the snapshot was taken with.
 function UEB.diff(ref, label, update)
     local snap = requireSnapshot(label)
     local opts = snap.options
@@ -457,9 +510,10 @@ function UEB.diff(ref, label, update)
 
     if update then
         snap.props, snap.count, snap.path, snap.class = props, count, walk.object, walk.class
-        snap.taken = os.clock()
+        snap.taken = os.time()
         out.updated = true
     end
+    capRows(out)
     return out
 end
 
@@ -667,6 +721,11 @@ function UEB.dump(kind)
     return "dump " .. kind .. " written to the ue4ss directory"
 end
 
+-- Ops whose result already went through encodeValue (diff rows are built out of encoded walks).
+-- Re-encoding would re-apply MAX_DEPTH to values that are already several levels deep and turn a
+-- row list longer than MAX_ITEMS into a JSON object, so UEB.batch passes them through as-is.
+local PREENCODED_OPS = { snapshot = true, diff = true, snapshots = true, forget = true }
+
 -- Several ops in one round trip, each pcall-fenced. Also the structured surface that stays
 -- available when allow_eval is off.
 local BATCH_OPS = {
@@ -705,7 +764,8 @@ function UEB.batch(calls)
         else
             trace("batch[" .. i .. "] " .. op)
             local ok, res = pcall(fn, c)
-            if ok then out[i] = { op = op, ok = true, result = encodeValue(res, 1) }
+            if ok then
+                out[i] = { op = op, ok = true, result = PREENCODED_OPS[op] and res or encodeValue(res, 1) }
             else out[i] = { op = op, ok = false, error = tostring(res) } end
         end
     end

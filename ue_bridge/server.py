@@ -11,7 +11,7 @@ Run from a shell:               ue-bridge ping | hello | status | world
                                 ue-bridge eval "return UEB.world()"
                                 ue-bridge props <ref> | funcs <ref> | objects <Class>
                                 ue-bridge types [pattern] | console <cmd>
-                                ue-bridge snapshot <ref> <label> | diff <ref> <label>
+                                ue-bridge snapshot <ref> <label> | diff [<ref>] <label>
                                 ue-bridge snapshots | forget <label>
 
 Configuration, all optional, first match wins:
@@ -449,21 +449,28 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         same meaning as on inspect_object and are remembered with the snapshot, so the diff re-walks
         exactly the same set. Reusing a label replaces that snapshot.
 
-        Returns {label, path, count, taken}. Snapshots live in the game process: they survive a
-        UEB.reload() but not a game restart.
+        Returns {label, path, count, taken}, where `taken` is a wall-clock timestamp (os.time()
+        in the game, whole seconds since the epoch). Snapshots live in the game process: they
+        survive a UEB.reload() but not a game restart.
         """
         return one("snapshot", timeout=30, ref=ref, label=label,
                    include_super=bool(include_super), pattern=pattern)
 
     @mcp.tool()
-    def diff_object(ref: str, label: str, update: bool = False) -> dict:
+    def diff_object(label: str, ref: str | None = None, update: bool = False) -> dict:
         """Re-walk an object and report what changed since the snapshot stored under `label`. Read-only.
+
+        ref defaults to the reference the snapshot was taken with, which is the usual call; pass one
+        only to compare a different object against the stored walk.
 
         Returns {label, path, changed, added, removed, same}, where each changed row is
         {path, before, after} with a dotted path into the property ("Mesh.RelativeLocation.X",
         "Inventory[3].Count"). Object-valued properties compare by their path, not their address,
         so an unchanged object diffs empty. If the reference now resolves to a different object the
         old path comes back as `stored_path` and the diff still runs.
+
+        Each of the three lists holds at most 500 rows; when that bites, `truncated` counts the rows
+        dropped per list.
 
         update=True replaces the snapshot with this walk after diffing, which turns repeated calls
         into a running "what changed since last time". An unknown label raises and names the ones
@@ -473,7 +480,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 
     @mcp.tool()
     def list_snapshots() -> dict:
-        """Snapshots currently held in the game: label, object path, when taken, property count. Read-only."""
+        """Snapshots currently held in the game: label, object path, `taken` (a wall-clock timestamp in whole seconds), property count. Read-only."""
         return one("snapshots")
 
     @mcp.tool()
@@ -516,7 +523,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
           {"op": "props",   "ref": ..., "include_super": bool, "read_soft": bool, "pattern": str}
           {"op": "funcs",   "ref": ...}
           {"op": "snapshot",  "ref": ..., "label": str, "include_super": bool, "pattern": str}
-          {"op": "diff",      "ref": ..., "label": str, "update": bool}
+          {"op": "diff",      "label": str, "ref": ... (optional), "update": bool}
           {"op": "snapshots"}
           {"op": "forget",    "label": str}
           {"op": "objects", "class_name": ..., "limit": int}
@@ -575,8 +582,13 @@ def _cli(cmd: str, rest: list[str]) -> int:
             print(json.dumps(one("snapshot", 30, ref=arg(0, "an object reference"),
                                  label=arg(1, "a snapshot label")), indent=1))
         elif cmd == "diff":
-            print(json.dumps(one("diff", 30, ref=arg(0, "an object reference"),
-                                 label=arg(1, "a snapshot label")), indent=1))
+            # "diff <label>" re-walks the reference the snapshot was taken with;
+            # "diff <ref> <label>" compares a different object against the stored walk.
+            if len(rest) >= 2:
+                d_ref, d_label = rest[0], rest[1]
+            else:
+                d_ref, d_label = None, arg(0, "a snapshot label")
+            print(json.dumps(one("diff", 30, ref=d_ref, label=d_label), indent=1))
         elif cmd == "snapshots":
             print(json.dumps(one("snapshots"), indent=1))
         elif cmd == "forget":
