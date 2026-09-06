@@ -30,7 +30,7 @@ mod; **no `mods.txt` edit**. `UE4SS.log` shows `[UEBridge] v1.0.0 ready` when it
 | Key | Default | Effect |
 |---|---|---|
 | `enabled` | `true` | `false` stops polling entirely |
-| `poll_ms` | `250` | request file check interval |
+| `poll_ms` | `50` | request file check interval |
 | `allow_eval` | `true` | `false` refuses raw Lua (`eval_lua`); structured tools still work |
 | `allow_writes` | `true` | `false` is read-only: `set_property`, `call_function`, `console_command` and `eval_lua` are refused |
 | `bridge_dir` | unset | absolute path override for the request/response folder |

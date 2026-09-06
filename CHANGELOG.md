@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `poll_ms` default lowered from 250 to 50. Measured on The Lantern of the Laughless Saint (UE 5.8), 60 pings each: median 209 ms at 250, median 57 ms and p90 107 ms at 50. The Python response wait stays at 50 ms; 20 ms gave the same mean (~70 ms), since the mod's poll sets the pace.
+- The mod keeps its 50 ms floor; lower values are clamped.
+
 ## 1.0.0 (2026-09-05)
 
 First release.

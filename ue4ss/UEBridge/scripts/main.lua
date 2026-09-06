@@ -55,7 +55,7 @@ end
 --   bridge_dir    override the request/response folder (absolute path).
 -- The file lives in scripts\ because mod managers that deploy only <mod>\scripts would otherwise
 -- drop it. A copy at the mod root is still honoured first.
-local SETTINGS = { enabled = true, poll_ms = 250, allow_eval = true, allow_writes = true, bridge_dir = nil }
+local SETTINGS = { enabled = true, poll_ms = 50, allow_eval = true, allow_writes = true, bridge_dir = nil }
 do
     local chunk = loadfile(MOD_DIR .. "\\settings.lua")
                   or loadfile(MOD_DIR .. "\\scripts\\settings.lua")
@@ -76,7 +76,7 @@ local DIR = SETTINGS.bridge_dir or (UE4SS_DIR .. "\\bridge")
 local REQUEST = DIR .. "/request.json"
 local RESPONSE = DIR .. "/response.json"
 local RESPONSE_TMP = DIR .. "/response.tmp"
-local POLL_MS = math.max(50, tonumber(SETTINGS.poll_ms) or 250)
+local POLL_MS = math.max(50, tonumber(SETTINGS.poll_ms) or 50)
 
 -- One line, rewritten in place and flushed, naming the operation in flight. A native crash cannot
 -- be caught by pcall; the server reads this after a timeout to report what was running.

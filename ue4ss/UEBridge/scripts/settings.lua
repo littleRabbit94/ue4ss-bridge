@@ -6,7 +6,7 @@ return {
     enabled = true,
 
     -- How often the request file is checked, in milliseconds.
-    poll_ms = 250,
+    poll_ms = 50,
 
     -- false refuses raw Lua (the eval_lua tool). The structured tools (inspect_object,
     -- get_property, find_objects, ...) keep working through the batch op.
