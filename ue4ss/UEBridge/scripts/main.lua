@@ -9,17 +9,17 @@
 -- file exists. All game-object access happens inside ExecuteInGameThread. The mod opens no
 -- sockets and starts no processes; everything it does is in reply to a file in its own folder.
 --
--- Wire format (protocol 1)
+-- Wire format (protocol 2)
 --   request : {"id": string, "op": "hello"|"ping"|"eval"|"batch", "code": string, "calls": [..]}
 --   response: {"id", "ok": bool, "result": any, "output": [string], "error": string|null,
---              "ms": n, "protocol": 1}
+--              "ms": n, "protocol": 2}
 --
 -- Eval snippets run in an environment that inherits _G plus the UEB helper table below. Whatever
 -- the chunk returns is serialised: UObjects become {"__object": fullname, "address": n}, FName /
 -- FString become strings, TArrays become lists, structs are walked through their reflected type.
 
 local VERSION = "1.0.0"
-local PROTOCOL = 1
+local PROTOCOL = 2
 local MOD_NAME = "UEBridge"
 
 -- Paths -----------------------------------------------------------------------------------
@@ -332,6 +332,158 @@ function UEB.props(ref, includeSuper, readSoft, pattern)
     return { object = obj:GetFullName(), class = obj:GetClass():GetFullName(), properties = out }
 end
 
+-- Snapshots and diffs ---------------------------------------------------------------------
+-- A snapshot is one UEB.props walk kept in memory under a caller-chosen label, so a later walk of
+-- the same object can be compared against it ("what did pressing that button change?"). All four
+-- ops are read-only: they never touch requireWrites, so they work with allow_writes = false.
+--
+-- The store lives on _G, not in a local, so UEB.reload() (which dofile()s this file) keeps it.
+-- It is keyed by label, never by object address: an address is reused after a GC and would make
+-- two unrelated objects look like one.
+UEB_SNAPSHOTS = UEB_SNAPSHOTS or {}
+
+-- Both sides of a diff come out of encodeValue, so the caps that shape it (MAX_DEPTH, MAX_ITEMS)
+-- apply equally and a truncated tail encodes to the same "<N more>" marker on both walks. Only the
+-- address of an object or struct is volatile between walks of unchanged state, so it is ignored:
+-- object references compare by their encoded path string.
+local function volatileKey(t, k)
+    return k == "address" and (t.__object ~= nil or t.__struct ~= nil)
+end
+
+local function joinPath(base, k)
+    if type(k) == "number" then return base .. "[" .. tostring(k) .. "]" end
+    if base == "" then return tostring(k) end
+    return base .. "." .. tostring(k)
+end
+
+local diffValue
+
+-- Appends {path, before, after} rows into out.changed / out.added / out.removed.
+diffValue = function(path, before, after, out)
+    local tb, ta = type(before), type(after)
+    if tb ~= "table" or ta ~= "table" then
+        if tb ~= ta or before ~= after then
+            out.changed[#out.changed + 1] = { path = path, before = before, after = after }
+        end
+        return
+    end
+    if before.__object ~= nil or after.__object ~= nil then
+        if tostring(before.__object) ~= tostring(after.__object) then
+            out.changed[#out.changed + 1] = { path = path, before = before.__object, after = after.__object }
+        end
+        return
+    end
+    for k, v in pairs(before) do
+        if not volatileKey(before, k) then
+            local av = after[k]
+            if av == nil then
+                out.removed[#out.removed + 1] = { path = joinPath(path, k), before = v }
+            else
+                diffValue(joinPath(path, k), v, av, out)
+            end
+        end
+    end
+    for k, v in pairs(after) do
+        if not volatileKey(after, k) and before[k] == nil then
+            out.added[#out.added + 1] = { path = joinPath(path, k), after = v }
+        end
+    end
+end
+
+-- The walk as {name -> {type, value}}, which is what a diff indexes.
+local function propIndex(walk)
+    local m, n = {}, 0
+    for _, p in ipairs(walk.properties or {}) do
+        m[p.name] = { type = p.type, value = p.value }
+        n = n + 1
+    end
+    return m, n
+end
+
+local function requireSnapshot(label)
+    if type(label) ~= "string" or label == "" then error("a snapshot label (a non-empty string) is required") end
+    local snap = UEB_SNAPSHOTS[label]
+    if snap then return snap end
+    local known = {}
+    for k in pairs(UEB_SNAPSHOTS) do known[#known + 1] = k end
+    table.sort(known)
+    error("no snapshot labelled '" .. label .. "'; known: "
+          .. (#known > 0 and table.concat(known, ", ") or "<none>"))
+end
+
+-- Walk an object and keep the result under label. Storing under an existing label replaces it.
+function UEB.snapshot(ref, label, includeSuper, pattern)
+    if type(label) ~= "string" or label == "" then error("snapshot needs a label (a non-empty string)") end
+    if includeSuper == nil then includeSuper = false end
+    local walk = UEB.props(ref, includeSuper, false, pattern)
+    local props, count = propIndex(walk)
+    local taken = os.clock()
+    UEB_SNAPSHOTS[label] = {
+        label = label, path = walk.object, class = walk.class, taken = taken, count = count,
+        options = { ref = ref, include_super = includeSuper, pattern = pattern },
+        props = props,
+    }
+    return { label = label, path = walk.object, count = count, taken = taken }
+end
+
+-- Re-walk with the options the snapshot was taken with and compare against it.
+function UEB.diff(ref, label, update)
+    local snap = requireSnapshot(label)
+    local opts = snap.options
+    if ref == nil then ref = opts.ref end
+    local walk = UEB.props(ref, opts.include_super, false, opts.pattern)
+    local props, count = propIndex(walk)
+
+    local out = { label = label, path = walk.object, changed = {}, added = {}, removed = {}, same = 0 }
+    if walk.object ~= snap.path then
+        out.stored_path = snap.path
+        out.path_changed = true
+    end
+    for name, old in pairs(snap.props) do
+        local new = props[name]
+        if new == nil then
+            out.removed[#out.removed + 1] = { path = name, before = old.value }
+        else
+            local before = #out.changed + #out.added + #out.removed
+            diffValue(name, old.value, new.value, out)
+            if #out.changed + #out.added + #out.removed == before then out.same = out.same + 1 end
+        end
+    end
+    for name, new in pairs(props) do
+        if snap.props[name] == nil then
+            out.added[#out.added + 1] = { path = name, after = new.value }
+        end
+    end
+
+    if update then
+        snap.props, snap.count, snap.path, snap.class = props, count, walk.object, walk.class
+        snap.taken = os.clock()
+        out.updated = true
+    end
+    return out
+end
+
+function UEB.snapshots()
+    local out = {}
+    for label, snap in pairs(UEB_SNAPSHOTS) do
+        out[#out + 1] = { label = label, path = snap.path, taken = snap.taken, count = snap.count }
+    end
+    table.sort(out, function(a, b) return a.label < b.label end)
+    return out
+end
+
+function UEB.forget(label)
+    if type(label) ~= "string" or label == "" then error("forget needs a label, or \"*\" for all") end
+    if label == "*" then
+        local n = 0
+        for k in pairs(UEB_SNAPSHOTS) do UEB_SNAPSHOTS[k] = nil; n = n + 1 end
+        return { forgotten = n }
+    end
+    requireSnapshot(label)
+    UEB_SNAPSHOTS[label] = nil
+    return { forgotten = 1, label = label }
+end
+
 -- Reflected UFunctions on the object's class chain.
 function UEB.funcs(ref)
     local obj = UEB.resolve(ref)
@@ -525,6 +677,10 @@ local BATCH_OPS = {
     call    = function(a) return UEB.call(a.ref, a["function"], a.args) end,
     props   = function(a) return UEB.props(a.ref, a.include_super, a.read_soft, a.pattern) end,
     funcs   = function(a) return UEB.funcs(a.ref) end,
+    snapshot  = function(a) return UEB.snapshot(a.ref, a.label, a.include_super, a.pattern) end,
+    diff      = function(a) return UEB.diff(a.ref, a.label, a.update) end,
+    snapshots = function(a) return UEB.snapshots() end,
+    forget    = function(a) return UEB.forget(a.label) end,
     objects = function(a) return UEB.objects(a.class_name, a.limit) end,
     types   = function(a) return UEB.types(a.pattern, a.limit) end,
     console = function(a) return UEB.console(a.command) end,

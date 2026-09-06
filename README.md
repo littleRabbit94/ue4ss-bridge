@@ -66,6 +66,8 @@ ue-bridge hello
 ue-bridge eval "return UEB.world()"
 ue-bridge props first:PlayerController
 ue-bridge types ^Narrative
+ue-bridge snapshot first:PlayerController before
+ue-bridge diff first:PlayerController before
 ```
 
 ## Tools
@@ -82,6 +84,10 @@ ue-bridge types ^Narrative
 | `get_property` / `set_property` | One property. `set` returns `{previous, current}`. |
 | `call_function(ref, fn, args)` | Call a UFunction with positional args. |
 | `console_command(cmd)` | Run a console command. |
+| `snapshot_object(ref, label, include_super, pattern)` | Keep an `inspect_object` walk in the game under a label. Read-only. |
+| `diff_object(ref, label, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. Read-only. |
+| `list_snapshots()` | Labels held, with object path, timestamp and property count. Read-only. |
+| `forget_snapshot(label)` | Drop one snapshot, or all with `"*"`. Read-only. |
 | `batch(calls)` | Several of the above in one round trip. |
 | `dump(kind)` | UE4SS dumpers: `usmap`, `jmap`, `uht`, `cxx`, `actors`, `objects`, `static_meshes`. |
 
@@ -96,11 +102,15 @@ become strings, `TArray` becomes a list (first 200), structs are walked through 
 type including inherited fields. `SoftObjectProperty` values are skipped by default (reading one
 has hard-crashed a game inside UE4SS's own property reader).
 
-## Wire protocol (1)
+Snapshots live in the game process, keyed by label rather than by object address. They survive
+`UEB.reload()` and are lost when the game exits. A diff ignores object and struct addresses and
+uses the same depth and array caps as the original walk, so an unchanged object diffs empty.
+
+## Wire protocol (2)
 
 ```
 request : {"id": str, "op": "hello"|"ping"|"eval"|"batch", "code": str, "calls": [ {op, ...} ]}
-response: {"id", "ok": bool, "result", "output": [str], "error": str|null, "ms": int, "protocol": 1}
+response: {"id", "ok": bool, "result", "output": [str], "error": str|null, "ms": int, "protocol": 2}
 ```
 
 `hello` returns the mod's version, protocol and permissions; the server refuses to proceed on a

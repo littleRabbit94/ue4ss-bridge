@@ -11,6 +11,8 @@ Run from a shell:               ue-bridge ping | hello | status | world
                                 ue-bridge eval "return UEB.world()"
                                 ue-bridge props <ref> | funcs <ref> | objects <Class>
                                 ue-bridge types [pattern] | console <cmd>
+                                ue-bridge snapshot <ref> <label> | diff <ref> <label>
+                                ue-bridge snapshots | forget <label>
 
 Configuration, all optional, first match wins:
   --game-dir PATH / UE_BRIDGE_GAME_DIR   the game root or any folder under it
@@ -32,7 +34,7 @@ from typing import Any
 
 from . import __version__
 
-PROTOCOL = 1
+PROTOCOL = 2
 DEFAULT_TIMEOUT = 15.0
 # An unconsumed request.json older than this is a leftover from a dead game, not a call in flight.
 STALE_REQUEST_S = 10.0
@@ -400,7 +402,8 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         ForEachUObject, ...) plus the UEB helper table: UEB.resolve(ref), UEB.props(ref),
         UEB.funcs(ref), UEB.get(ref, name), UEB.set(ref, name, value), UEB.call(ref, fn, args),
         UEB.objects(class, limit), UEB.types(pattern, limit), UEB.console(cmd), UEB.world(),
-        UEB.dump(kind). print() output is captured and returned alongside the result. Refused when
+        UEB.dump(kind), UEB.snapshot(ref, label), UEB.diff(ref, label), UEB.snapshots(),
+        UEB.forget(label). print() output is captured and returned alongside the result. Refused when
         the mod's settings.lua sets allow_eval = false; the other tools keep working.
         """
         return _unwrap(eval_lua(code, timeout))
@@ -438,6 +441,47 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         return one("props", timeout=30, ref=ref, include_super=bool(include_super), read_soft=False, pattern=pattern)
 
     @mcp.tool()
+    def snapshot_object(ref: str, label: str, include_super: bool = False, pattern: str | None = None) -> dict:
+        """Walk an object's reflected properties and keep the result in the game under `label`. Read-only.
+
+        The same walk as inspect_object, kept for diff_object to compare a later walk against, so
+        you can do a thing in game and then ask what it changed. include_super and pattern have the
+        same meaning as on inspect_object and are remembered with the snapshot, so the diff re-walks
+        exactly the same set. Reusing a label replaces that snapshot.
+
+        Returns {label, path, count, taken}. Snapshots live in the game process: they survive a
+        UEB.reload() but not a game restart.
+        """
+        return one("snapshot", timeout=30, ref=ref, label=label,
+                   include_super=bool(include_super), pattern=pattern)
+
+    @mcp.tool()
+    def diff_object(ref: str, label: str, update: bool = False) -> dict:
+        """Re-walk an object and report what changed since the snapshot stored under `label`. Read-only.
+
+        Returns {label, path, changed, added, removed, same}, where each changed row is
+        {path, before, after} with a dotted path into the property ("Mesh.RelativeLocation.X",
+        "Inventory[3].Count"). Object-valued properties compare by their path, not their address,
+        so an unchanged object diffs empty. If the reference now resolves to a different object the
+        old path comes back as `stored_path` and the diff still runs.
+
+        update=True replaces the snapshot with this walk after diffing, which turns repeated calls
+        into a running "what changed since last time". An unknown label raises and names the ones
+        that exist.
+        """
+        return one("diff", timeout=30, ref=ref, label=label, update=bool(update))
+
+    @mcp.tool()
+    def list_snapshots() -> dict:
+        """Snapshots currently held in the game: label, object path, when taken, property count. Read-only."""
+        return one("snapshots")
+
+    @mcp.tool()
+    def forget_snapshot(label: str) -> dict:
+        """Drop one stored snapshot, or all of them with label="*". Read-only; frees memory in the game process."""
+        return one("forget", label=label)
+
+    @mcp.tool()
     def list_functions(ref: str) -> dict:
         """Every reflected UFunction callable on an object, across its class chain."""
         return one("funcs", ref=ref)
@@ -471,6 +515,10 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
           {"op": "call",    "ref": ..., "function": ..., "args": [...]}
           {"op": "props",   "ref": ..., "include_super": bool, "read_soft": bool, "pattern": str}
           {"op": "funcs",   "ref": ...}
+          {"op": "snapshot",  "ref": ..., "label": str, "include_super": bool, "pattern": str}
+          {"op": "diff",      "ref": ..., "label": str, "update": bool}
+          {"op": "snapshots"}
+          {"op": "forget",    "label": str}
           {"op": "objects", "class_name": ..., "limit": int}
           {"op": "types",   "pattern": ..., "limit": int}
           {"op": "console", "command": ...}
@@ -523,6 +571,16 @@ def _cli(cmd: str, rest: list[str]) -> int:
             print(json.dumps(one("world"), indent=1))
         elif cmd == "props":
             print(json.dumps(one("props", 30, ref=arg(0, "an object reference")), indent=1))
+        elif cmd == "snapshot":
+            print(json.dumps(one("snapshot", 30, ref=arg(0, "an object reference"),
+                                 label=arg(1, "a snapshot label")), indent=1))
+        elif cmd == "diff":
+            print(json.dumps(one("diff", 30, ref=arg(0, "an object reference"),
+                                 label=arg(1, "a snapshot label")), indent=1))
+        elif cmd == "snapshots":
+            print(json.dumps(one("snapshots"), indent=1))
+        elif cmd == "forget":
+            print(json.dumps(one("forget", label=arg(0, "a snapshot label, or \"*\" for all")), indent=1))
         elif cmd == "funcs":
             print(json.dumps(one("funcs", ref=arg(0, "an object reference")), indent=1))
         elif cmd == "objects":
