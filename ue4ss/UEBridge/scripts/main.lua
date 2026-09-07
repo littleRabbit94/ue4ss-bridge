@@ -18,7 +18,7 @@
 -- the chunk returns is serialised: UObjects become {"__object": fullname, "address": n}, FName /
 -- FString become strings, TArrays become lists, structs are walked through their reflected type.
 
-local VERSION = "1.0.0"
+local VERSION = "1.1.0"
 local PROTOCOL = 2
 local MOD_NAME = "UEBridge"
 
@@ -54,11 +54,15 @@ end
 --   allow_writes  false refuses anything that changes state: set, call, console, and eval.
 --   bridge_dir    override the request/response folder (absolute path).
 -- The file lives in scripts\ because mod managers that deploy only <mod>\scripts would otherwise
--- drop it. A copy at the mod root is still honoured first.
+-- drop it. 1.0.0 shipped it at the mod root instead, so a root copy is still read, but only as a
+-- fallback: scripts\settings.lua wins, or an in-place upgrade would silently keep the old file.
 local SETTINGS = { enabled = true, poll_ms = 50, allow_eval = true, allow_writes = true, bridge_dir = nil }
+local ROOT_SETTINGS_IGNORED = false
 do
-    local chunk = loadfile(MOD_DIR .. "\\settings.lua")
-                  or loadfile(MOD_DIR .. "\\scripts\\settings.lua")
+    local scriptsChunk = loadfile(MOD_DIR .. "\\scripts\\settings.lua")
+    local rootChunk = loadfile(MOD_DIR .. "\\settings.lua")
+    if scriptsChunk and rootChunk then ROOT_SETTINGS_IGNORED = true end
+    local chunk = scriptsChunk or rootChunk
     if chunk then
         local ok, user = pcall(chunk)
         if ok and type(user) == "table" then
@@ -69,6 +73,18 @@ do
             log("settings.lua did not return a table (%s); using defaults", tostring(user))
         end
     end
+end
+if ROOT_SETTINGS_IGNORED then
+    log("ignoring the settings.lua at the mod root: scripts\\settings.lua is the one in use "
+        .. "(delete %s\\settings.lua, it is a leftover from 1.0.0)", MOD_DIR)
+end
+
+-- eval can write, so it is gated by allow_writes. Say so at load: a user who set allow_eval = true
+-- alongside allow_writes = false would otherwise only see eval refused for a key they set to true.
+local EVAL_FORCED_OFF = false
+if not SETTINGS.allow_writes and SETTINGS.allow_eval then
+    EVAL_FORCED_OFF = true
+    log("allow_writes = false forces allow_eval off (eval can write); structured batch ops still work")
 end
 if not SETTINGS.allow_writes then SETTINGS.allow_eval = false end
 
@@ -243,7 +259,8 @@ function encodeValue(v, depth)
             local k = keys[i]
             out[type(k) == "number" and k or tostring(k)] = encodeValue(v[k], depth + 1)
         end
-        if n > MAX_ITEMS then out["<more>"] = true end
+        -- The count, not a flag: a truncated walk otherwise loses how much it dropped.
+        if n > MAX_ITEMS then out["<more>"] = n - MAX_ITEMS end
         return out
     end
     if tv == "userdata" then
@@ -721,10 +738,13 @@ function UEB.dump(kind)
     return "dump " .. kind .. " written to the ue4ss directory"
 end
 
--- Ops whose result already went through encodeValue (diff rows are built out of encoded walks).
--- Re-encoding would re-apply MAX_DEPTH to values that are already several levels deep and turn a
--- row list longer than MAX_ITEMS into a JSON object, so UEB.batch passes them through as-is.
-local PREENCODED_OPS = { snapshot = true, diff = true, snapshots = true, forget = true }
+-- Ops whose result needs no second encodeValue pass: either it already went through one (props
+-- encodes each property value; diff rows are built out of encoded walks) or it is plain scalars in
+-- plain tables (funcs, objects, types). Re-encoding would re-apply MAX_DEPTH to values already
+-- several levels deep and turn a list longer than MAX_ITEMS into a JSON object keyed "1".."200",
+-- so UEB.batch passes these through as-is.
+local PREENCODED_OPS = { props = true, funcs = true, objects = true, types = true,
+                         snapshot = true, diff = true, snapshots = true, forget = true }
 
 -- Several ops in one round trip, each pcall-fenced. Also the structured surface that stays
 -- available when allow_eval is off.
@@ -840,7 +860,11 @@ local function handle(req)
     end
     if not SETTINGS.allow_eval then
         respond(req.id, false, nil, {},
-            "eval refused: allow_eval = false in " .. MOD_NAME .. "/scripts/settings.lua (batch ops still work)", started)
+            (EVAL_FORCED_OFF
+                and "eval refused: allow_writes = false forces allow_eval off (eval can write); set "
+                    .. "allow_writes = true in " .. MOD_NAME .. "/scripts/settings.lua (batch ops still work)"
+                or "eval refused: allow_eval = false in " .. MOD_NAME .. "/scripts/settings.lua (batch ops still work)"),
+            started)
         return
     end
     busy = true

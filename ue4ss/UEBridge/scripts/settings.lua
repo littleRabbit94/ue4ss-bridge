@@ -1,5 +1,6 @@
 -- UEBridge settings. Every key is optional; a missing key takes the default shown.
--- This file belongs next to main.lua, inside the mod's scripts folder.
+-- This file belongs next to main.lua, inside the mod's scripts folder. That copy always wins; a
+-- settings.lua at the mod root (where 1.0.0 put it) is read only when scripts\ has none.
 -- Edit, save, then either restart the game or run UEB.reload() through the bridge.
 return {
     -- false turns the bridge off without removing the mod. Nothing is polled.
@@ -10,6 +11,8 @@ return {
 
     -- false refuses raw Lua (the eval_lua tool). The structured tools (inspect_object,
     -- get_property, find_objects, ...) keep working through the batch op.
+    -- allow_writes = false forces this off, whatever it is set to here, because eval can write;
+    -- the mod logs one line when it does.
     allow_eval = true,
 
     -- false makes the bridge read-only: set_property, call_function, console_command and

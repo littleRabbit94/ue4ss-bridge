@@ -23,15 +23,17 @@ access to the game folder can talk to it.
 Extract the release zip into the folder that holds the `ue4ss` folder,
 `<game>\<Project>\Binaries\Win64` (the folder with the game's exe). It carries the path, so the
 files land in `ue4ss\Mods\UEBridge`. `enabled.txt` in that folder starts the
-mod; **no `mods.txt` edit**. `UE4SS.log` shows `[UEBridge] v1.0.0 ready` when it loaded.
+mod; **no `mods.txt` edit**. `UE4SS.log` shows `[UEBridge] v1.1.0 ready` when it loaded.
 
-`scripts\settings.lua` in the mod folder:
+`scripts\settings.lua` in the mod folder. That copy always wins; a `settings.lua` at the mod root
+(where 1.0.0 put it) is read only when `scripts\` has none, and the mod logs one line naming it as
+ignored when both exist, so delete the root file after an in-place upgrade.
 
 | Key | Default | Effect |
 |---|---|---|
 | `enabled` | `true` | `false` stops polling entirely |
 | `poll_ms` | `50` | request file check interval |
-| `allow_eval` | `true` | `false` refuses raw Lua (`eval_lua`); structured tools still work |
+| `allow_eval` | `true` | `false` refuses raw Lua (`eval_lua`); structured tools still work. `allow_writes = false` forces this off, since eval can write; the mod logs one line when it does |
 | `allow_writes` | `true` | `false` is read-only: `set_property`, `call_function`, `console_command` and `eval_lua` are refused |
 | `bridge_dir` | unset | absolute path override for the request/response folder |
 
@@ -67,6 +69,7 @@ ue-bridge eval "return UEB.world()"
 ue-bridge props first:PlayerController
 ue-bridge types ^Narrative
 ue-bridge snapshot first:PlayerController before --super   # --super: include inherited properties (props too)
+ue-bridge props first:PlayerController --super
 ue-bridge diff before                       # or: diff <ref> <label> for another object
 ```
 
@@ -85,7 +88,7 @@ ue-bridge diff before                       # or: diff <ref> <label> for another
 | `call_function(ref, fn, args)` | Call a UFunction with positional args. |
 | `console_command(cmd)` | Run a console command. |
 | `snapshot_object(ref, label, include_super, pattern)` | Keep an `inspect_object` walk in the game under a label. Read-only. |
-| `diff_object(label, ref, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. `ref` defaults to the snapshot's own reference. At most 500 rows per list, with a `truncated` count when that bites. Read-only. |
+| `diff_object(label, ref, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path; `same` is the number of top-level properties with no changed, added or removed rows. `ref` defaults to the snapshot's own reference. At most 500 rows per list, with a `truncated` count when that bites. Read-only. |
 | `list_snapshots()` | Labels held, with object path, wall-clock `taken` timestamp (whole seconds since the epoch) and property count. Read-only. |
 | `forget_snapshot(label)` | Drop one snapshot, or all with `"*"`. Read-only. |
 | `batch(calls)` | Several of the above in one round trip. |
@@ -100,7 +103,8 @@ instance), `cdo:/Script/Pkg.Class` (class default object).
 **Serialisation**: UObjects become `{"__object": fullname, "address": n}`, `FName`/`FString`/`FText`
 become strings, `TArray` becomes a list (first 200), structs are walked through their reflected
 type including inherited fields. `SoftObjectProperty` values are skipped by default (reading one
-has hard-crashed a game inside UE4SS's own property reader).
+has hard-crashed a game inside UE4SS's own property reader). A plain Lua table longer than 200 keys
+keeps the first 200 by sorted key and carries `"<more>"`, the number of keys dropped.
 
 Snapshots live in the game process, keyed by label rather than by object address. They survive
 `UEB.reload()` and are lost when the game exits. A diff ignores object and struct addresses and

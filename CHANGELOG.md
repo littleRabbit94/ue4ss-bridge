@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 (2026-09-07)
 
-- CLI: `props` and `snapshot` take `--super` to include inherited properties, matching the MCP tools' `include_super`.
+- CLI: `props` and `snapshot` take `--super` to include inherited properties, matching the MCP tools' `include_super`; the CLI help now lists it.
+- `scripts\settings.lua` is loaded first and a `settings.lua` at the mod root only as a fallback, so an in-place upgrade from 1.0.0 no longer keeps the old file (including its 250 ms poll) and a mod manager that deploys `scripts\` is no longer overridden. With both present the mod logs one line naming the root file as ignored.
+- `props`, `funcs`, `objects` and `types` results pass through `batch` unchanged, like `diff`, so a walk of more than 200 properties stays a JSON list instead of turning into an object keyed `"1"`..`"200"`.
+- A truncated plain Lua table's `"<more>"` is the number of keys dropped, not `true`.
+- `bridge_status` re-checks the running process before reading the game's identity, so it names the game that is running now rather than the previous one after a switch.
+- `allow_writes = false` still forces `allow_eval` off, but the mod logs one line saying so at load and the eval refusal names `allow_writes` as the cause.
+- `same` in a diff is documented consistently as the number of top-level properties with no changed, added or removed rows.
 - Release README no longer states the old 250 ms poll.
 - **Snapshot and diff.** Four new `batch` ops: `snapshot` (ref, label, include_super, pattern) keeps a property walk in the game under a label, `diff` (ref, label, update) re-walks with the stored options and reports `{changed, added, removed, same}` with dotted property paths, `snapshots` lists what is held, `forget` drops one label or all with `"*"`. MCP tools `snapshot_object`, `diff_object`, `list_snapshots`, `forget_snapshot` and the matching CLI subcommands.
 - All four are read-only: they work with `allow_writes = false` and `allow_eval = false`. Snapshots are keyed by label, not by object address, are stored on `_G` so `UEB.reload()` keeps them, and are lost when the game exits. Diffs ignore object and struct addresses and reuse the walk's depth and array caps, so an unchanged object diffs empty.

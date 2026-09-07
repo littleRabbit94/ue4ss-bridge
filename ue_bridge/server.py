@@ -9,9 +9,10 @@ Run as an MCP server (stdio):   ue-bridge                (or: python -m ue_bridg
 Run as an MCP server (HTTP):    ue-bridge --http [--port 8930]
 Run from a shell:               ue-bridge ping | hello | status | world
                                 ue-bridge eval "return UEB.world()"
-                                ue-bridge props <ref> | funcs <ref> | objects <Class>
+                                ue-bridge props <ref> [--super] | funcs <ref> | objects <Class>
                                 ue-bridge types [pattern] | console <cmd>
-                                ue-bridge snapshot <ref> <label> | diff [<ref>] <label>
+                                ue-bridge snapshot <ref> <label> [--super] | diff [<ref>] <label>
+                                  --super includes inherited properties (props, snapshot)
                                 ue-bridge snapshots | forget <label>
 
 Configuration, all optional, first match wins:
@@ -372,13 +373,15 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     def bridge_status() -> dict:
         """Whether a UE4SS game is running and the UEBridge mod is answering. Reports the game found, mod version, permissions, round-trip time."""
         info: dict[str, Any] = {"server_version": __version__, "protocol": PROTOCOL}
+        # game_running() is what re-discovers after a game switch, so it runs BEFORE the identity
+        # fields are read; the other order names the previous game.
         try:
+            running = game_running()
             g = game()
         except BridgeError as e:
             info.update(game_running=False, bridge="down", detail=str(e))
             return info
         info.update(game=g.project, process=g.process, bridge_dir=str(g.bridge_dir))
-        running = game_running()
         info["game_running"] = running
         if not running:
             info["bridge"] = "down"
@@ -463,7 +466,8 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         ref defaults to the reference the snapshot was taken with, which is the usual call; pass one
         only to compare a different object against the stored walk.
 
-        Returns {label, path, changed, added, removed, same}, where each changed row is
+        Returns {label, path, changed, added, removed, same}, where `same` is the number of
+        top-level properties with no changed, added or removed rows, and each changed row is
         {path, before, after} with a dotted path into the property ("Mesh.RelativeLocation.X",
         "Inventory[3].Count"). Object-valued properties compare by their path, not their address,
         so an unchanged object diffs empty. If the reference now resolves to a different object the
