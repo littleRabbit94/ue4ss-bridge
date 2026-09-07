@@ -41,8 +41,8 @@ INSTALL
 
 WHAT IT DOES, EXACTLY
   Every 50 ms (poll_ms in scripts\\settings.lua) it checks for a file named request.json in
-  ue4ss\\bridge. If one appears it runs the
-  request on the game thread and writes response.json. That is all. It opens no network
+  ue4ss\\bridge. If one appears it runs the request on the game thread and writes
+  response.json. That is all. It opens no network
   connection, starts no program, and downloads nothing. Only software already running on your
   computer, with write access to your game folder, can talk to it.
 
