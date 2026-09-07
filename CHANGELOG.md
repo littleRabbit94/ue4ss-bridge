@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- CLI: `props` and `snapshot` take `--super` to include inherited properties, matching the MCP tools' `include_super`.
+- Release README no longer states the old 250 ms poll.
 - **Snapshot and diff.** Four new `batch` ops: `snapshot` (ref, label, include_super, pattern) keeps a property walk in the game under a label, `diff` (ref, label, update) re-walks with the stored options and reports `{changed, added, removed, same}` with dotted property paths, `snapshots` lists what is held, `forget` drops one label or all with `"*"`. MCP tools `snapshot_object`, `diff_object`, `list_snapshots`, `forget_snapshot` and the matching CLI subcommands.
 - All four are read-only: they work with `allow_writes = false` and `allow_eval = false`. Snapshots are keyed by label, not by object address, are stored on `_G` so `UEB.reload()` keeps them, and are lost when the game exits. Diffs ignore object and struct addresses and reuse the walk's depth and array caps, so an unchanged object diffs empty.
 - Values that are unstable between two walks no longer make an unchanged object diff non-empty: the userdata fallback compares by its `__type` and not its `tostring()` text, two `<error: ...>` read markers compare equal, a failed `ToString` encodes as `<FName>` rather than a pointer, and two NaNs compare equal. A plain Lua table longer than 200 keys sorts its keys before truncating, so the kept subset is the same on both walks.

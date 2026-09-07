@@ -557,6 +557,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 # --- CLI ------------------------------------------------------------------------------------
 
 def _cli(cmd: str, rest: list[str]) -> int:
+    # --super walks the class chain too (props, snapshot); a Blueprint child class declares
+    # few or no properties of its own, so without it the walk of a BP_* object is near empty.
+    include_super = "--super" in rest
+    rest = [r for r in rest if r != "--super"]
+
     def arg(i: int, what: str) -> str:
         if len(rest) <= i:
             raise BridgeError(f"{cmd} needs {what}")
@@ -577,10 +582,12 @@ def _cli(cmd: str, rest: list[str]) -> int:
         elif cmd == "world":
             print(json.dumps(one("world"), indent=1))
         elif cmd == "props":
-            print(json.dumps(one("props", 30, ref=arg(0, "an object reference")), indent=1))
+            print(json.dumps(one("props", 30, ref=arg(0, "an object reference"),
+                                 include_super=include_super), indent=1))
         elif cmd == "snapshot":
             print(json.dumps(one("snapshot", 30, ref=arg(0, "an object reference"),
-                                 label=arg(1, "a snapshot label")), indent=1))
+                                 label=arg(1, "a snapshot label"),
+                                 include_super=include_super), indent=1))
         elif cmd == "diff":
             # "diff <label>" re-walks the reference the snapshot was taken with;
             # "diff <ref> <label>" compares a different object against the stored walk.

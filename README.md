@@ -66,7 +66,7 @@ ue-bridge hello
 ue-bridge eval "return UEB.world()"
 ue-bridge props first:PlayerController
 ue-bridge types ^Narrative
-ue-bridge snapshot first:PlayerController before
+ue-bridge snapshot first:PlayerController before --super   # --super: include inherited properties (props too)
 ue-bridge diff before                       # or: diff <ref> <label> for another object
 ```
 
