@@ -750,6 +750,22 @@ local PREENCODED_OPS = { props = true, funcs = true, objects = true, types = tru
 -- available when allow_eval is off.
 local BATCH_OPS = {
     hello   = function(a) return UEB.hello() end,
+    -- reload re-reads settings.lua and re-runs this file in place (UEB.reload(), defined further
+    -- down, dofile()s MOD_PATH). It never touches requireWrites, so it works with allow_writes =
+    -- false and allow_eval = false, which is the point: it is how a user recovers after turning
+    -- eval off without a game restart. UEB.reload() runs synchronously on the same game thread
+    -- this batch handler is already on (ExecuteInGameThread in handle()), same as the eval path
+    -- that called it before this op existed, so it is safe here for the same reason. dofile
+    -- reassigns the global UEB table and bumps the global UEB_GENERATION; UEB.hello() below is
+    -- looked up fresh afterwards so it reports the settings now in effect, not the pre-reload ones.
+    reload  = function(a)
+        local msg = UEB.reload()
+        local info = UEB.hello()
+        info.reloaded = true
+        info.generation = UEB_GENERATION
+        info.message = msg
+        return info
+    end,
     world   = function(a) return UEB.world() end,
     get     = function(a) return UEB.get(a.ref, a.name) end,
     set     = function(a) return UEB.set(a.ref, a.name, a.value) end,

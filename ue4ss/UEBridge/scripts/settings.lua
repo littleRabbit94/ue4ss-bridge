@@ -1,7 +1,7 @@
 -- UEBridge settings. Every key is optional; a missing key takes the default shown.
 -- This file belongs next to main.lua, inside the mod's scripts folder. That copy always wins; a
 -- settings.lua at the mod root (where 1.0.0 put it) is read only when scripts\ has none.
--- Edit, save, then either restart the game or run UEB.reload() through the bridge.
+-- Edit, save, then `ue-bridge reload` (or the reload_mod tool), or restart the game.
 return {
     -- false turns the bridge off without removing the mod. Nothing is polled.
     enabled = true,

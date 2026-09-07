@@ -2,6 +2,8 @@
 
 ## 1.1.0 (2026-09-07)
 
+- New `reload` batch op and `reload_mod` MCP tool (CLI: `ue-bridge reload`) re-read `settings.lua` and re-run the mod in place via `UEB.reload()`. It bypasses `requireWrites`, so it is the way to recover after `allow_eval` was turned off without a game restart: eval was the only path to `UEB.reload()` before, and eval itself is refused when `allow_eval = false`.
+- README notes that `first:ShortClassName` can resolve to a template, cutscene copy or pooled actor rather than the live instance; use the exact path from `world_info` for the player pawn or controller.
 - CLI: `props` and `snapshot` take `--super` to include inherited properties, matching the MCP tools' `include_super`; the CLI help now lists it.
 - `scripts\settings.lua` is loaded first and a `settings.lua` at the mod root only as a fallback, so an in-place upgrade from 1.0.0 no longer keeps the old file (including its 250 ms poll) and a mod manager that deploys `scripts\` is no longer overridden. With both present the mod logs one line naming the root file as ignored.
 - `props`, `funcs`, `objects` and `types` results pass through `batch` unchanged, like `diff`, so a walk of more than 200 properties stays a JSON list instead of turning into an object keyed `"1"`..`"200"`.

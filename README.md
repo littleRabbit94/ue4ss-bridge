@@ -98,7 +98,9 @@ Every tool except `eval_lua` goes through the structured `batch` op, so they kee
 user turns `allow_eval` off.
 
 **Object references**: `/Script/Pkg.Object` (any full path), `first:ShortClassName` (first live
-instance), `cdo:/Script/Pkg.Class` (class default object).
+instance), `cdo:/Script/Pkg.Class` (class default object). `first:` returns whichever instance
+UE4SS finds first, which can be a template, a cutscene copy or a pooled actor rather than the live
+one; for the player pawn or controller prefer the exact path reported by `world_info`.
 
 **Serialisation**: UObjects become `{"__object": fullname, "address": n}`, `FName`/`FString`/`FText`
 become strings, `TArray` becomes a list (first 200), structs are walked through their reflected

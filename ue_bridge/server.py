@@ -7,7 +7,7 @@ found by looking for a running exe in a Binaries\\Win64 folder that has ue4ss\\ 
 
 Run as an MCP server (stdio):   ue-bridge                (or: python -m ue_bridge)
 Run as an MCP server (HTTP):    ue-bridge --http [--port 8930]
-Run from a shell:               ue-bridge ping | hello | status | world
+Run from a shell:               ue-bridge ping | hello | status | world | reload
                                 ue-bridge eval "return UEB.world()"
                                 ue-bridge props <ref> [--super] | funcs <ref> | objects <Class>
                                 ue-bridge types [pattern] | console <cmd>
@@ -493,6 +493,19 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         return one("forget", label=label)
 
     @mcp.tool()
+    def reload_mod() -> dict:
+        """Re-read settings.lua and re-run the UEBridge mod in place, no game restart needed.
+
+        Read-only from the caller's point of view: it does not touch game state, only the mod's
+        own settings. This is the way to recover after allow_eval was turned off in settings.lua
+        without a relaunch — eval() and this reload op are the only two paths that reach
+        UEB.reload(), and reload always works, even with allow_eval = false and allow_writes =
+        false. Returns the settings now in effect (poll_ms, allow_eval, allow_writes) plus the new
+        generation number.
+        """
+        return one("reload")
+
+    @mcp.tool()
     def list_functions(ref: str) -> dict:
         """Every reflected UFunction callable on an object, across its class chain."""
         return one("funcs", ref=ref)
@@ -520,6 +533,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         sequence of small calls is nearly all waiting. Each entry is a dict with an "op" key:
 
           {"op": "world"}
+          {"op": "reload"}
           {"op": "find",    "ref": ...}
           {"op": "get",     "ref": ..., "name": ...}
           {"op": "set",     "ref": ..., "name": ..., "value": ...}
@@ -585,6 +599,8 @@ def _cli(cmd: str, rest: list[str]) -> int:
             print(json.dumps(_unwrap(eval_lua(code)), indent=1))
         elif cmd == "world":
             print(json.dumps(one("world"), indent=1))
+        elif cmd == "reload":
+            print(json.dumps(one("reload"), indent=1))
         elif cmd == "props":
             print(json.dumps(one("props", 30, ref=arg(0, "an object reference"),
                                  include_super=include_super), indent=1))
