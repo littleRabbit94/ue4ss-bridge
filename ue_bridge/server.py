@@ -373,8 +373,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     def bridge_status() -> dict:
         """Whether a UE4SS game is running and the UEBridge mod is answering. Reports the game found, mod version, permissions, round-trip time."""
         info: dict[str, Any] = {"server_version": __version__, "protocol": PROTOCOL}
-        # game_running() is what re-discovers after a game switch, so it runs BEFORE the identity
-        # fields are read; the other order names the previous game.
+        # game_running() re-discovers after a game switch; read the identity fields after it.
         try:
             running = game_running()
             g = game()
@@ -447,10 +446,9 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     def snapshot_object(ref: str, label: str, include_super: bool = False, pattern: str | None = None) -> dict:
         """Walk an object's reflected properties and keep the result in the game under `label`. Read-only.
 
-        The same walk as inspect_object, kept for diff_object to compare a later walk against, so
-        you can do a thing in game and then ask what it changed. include_super and pattern have the
-        same meaning as on inspect_object and are remembered with the snapshot, so the diff re-walks
-        exactly the same set. Reusing a label replaces that snapshot.
+        The same walk as inspect_object, kept for diff_object. include_super and pattern are
+        stored with the snapshot so the diff re-walks the same set. Reusing a label replaces the
+        snapshot.
 
         Returns {label, path, count, taken}, where `taken` is a wall-clock timestamp (os.time()
         in the game, whole seconds since the epoch). Snapshots live in the game process: they
@@ -463,8 +461,8 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     def diff_object(label: str, ref: str | None = None, update: bool = False) -> dict:
         """Re-walk an object and report what changed since the snapshot stored under `label`. Read-only.
 
-        ref defaults to the reference the snapshot was taken with, which is the usual call; pass one
-        only to compare a different object against the stored walk.
+        ref defaults to the reference the snapshot was taken with; pass one to compare a different
+        object against the stored walk.
 
         Returns {label, path, changed, added, removed, same}, where `same` is the number of
         top-level properties with no changed, added or removed rows, and each changed row is
@@ -473,12 +471,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         so an unchanged object diffs empty. If the reference now resolves to a different object the
         old path comes back as `stored_path` and the diff still runs.
 
-        Each of the three lists holds at most 500 rows; when that bites, `truncated` counts the rows
-        dropped per list.
+        Each of the three lists holds at most 500 rows; `truncated` counts the rows dropped per
+        list when exceeded.
 
-        update=True replaces the snapshot with this walk after diffing, which turns repeated calls
-        into a running "what changed since last time". An unknown label raises and names the ones
-        that exist.
+        update=True replaces the snapshot with this walk after diffing, for a rolling diff. An
+        unknown label raises and names the ones that exist.
         """
         return one("diff", timeout=30, ref=ref, label=label, update=bool(update))
 
@@ -494,14 +491,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 
     @mcp.tool()
     def reload_mod() -> dict:
-        """Re-read settings.lua and re-run the UEBridge mod in place, no game restart needed.
+        """Re-read settings.lua and re-run the UEBridge mod in place; no game restart.
 
-        Read-only from the caller's point of view: it does not touch game state, only the mod's
-        own settings. This is the way to recover after allow_eval was turned off in settings.lua
-        without a relaunch — eval() and this reload op are the only two paths that reach
-        UEB.reload(), and reload always works, even with allow_eval = false and allow_writes =
-        false. Returns the settings now in effect (poll_ms, allow_eval, allow_writes) plus the new
-        generation number.
+        Read-only: touches only the mod's own settings, so it works with allow_eval = false and
+        allow_writes = false and is the recovery path after eval was turned off. Returns the
+        settings now in effect (poll_ms, allow_eval, allow_writes) and the new generation number.
         """
         return one("reload")
 
@@ -575,8 +569,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 # --- CLI ------------------------------------------------------------------------------------
 
 def _cli(cmd: str, rest: list[str]) -> int:
-    # --super walks the class chain too (props, snapshot); a Blueprint child class declares
-    # few or no properties of its own, so without it the walk of a BP_* object is near empty.
+    # --super includes inherited properties (props, snapshot); a BP_* child class declares few of its own.
     include_super = "--super" in rest
     rest = [r for r in rest if r != "--super"]
 

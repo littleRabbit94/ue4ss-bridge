@@ -54,8 +54,7 @@ end
 --   allow_writes  false refuses anything that changes state: set, call, console, and eval.
 --   bridge_dir    override the request/response folder (absolute path).
 -- The file lives in scripts\ because mod managers that deploy only <mod>\scripts would otherwise
--- drop it. 1.0.0 shipped it at the mod root instead, so a root copy is still read, but only as a
--- fallback: scripts\settings.lua wins, or an in-place upgrade would silently keep the old file.
+-- drop it. scripts\settings.lua wins; a root copy (the 1.0.0 layout) is a fallback only.
 local SETTINGS = { enabled = true, poll_ms = 50, allow_eval = true, allow_writes = true, bridge_dir = nil }
 local ROOT_SETTINGS_IGNORED = false
 do
@@ -75,12 +74,10 @@ do
     end
 end
 if ROOT_SETTINGS_IGNORED then
-    log("ignoring the settings.lua at the mod root: scripts\\settings.lua is the one in use "
-        .. "(delete %s\\settings.lua, it is a leftover from 1.0.0)", MOD_DIR)
+    log("scripts\\settings.lua in use; ignoring %s\\settings.lua (1.0.0 layout, delete it)", MOD_DIR)
 end
 
--- eval can write, so it is gated by allow_writes. Say so at load: a user who set allow_eval = true
--- alongside allow_writes = false would otherwise only see eval refused for a key they set to true.
+-- eval can write, so allow_writes = false forces it off. Logged so the refusal names the cause.
 local EVAL_FORCED_OFF = false
 if not SETTINGS.allow_writes and SETTINGS.allow_eval then
     EVAL_FORCED_OFF = true
@@ -246,8 +243,7 @@ function encodeValue(v, depth)
         local keys, n = {}, 0
         for k in pairs(v) do n = n + 1; keys[n] = k end
         if n > MAX_ITEMS then
-            -- pairs() order is not stable across walks, so an unsorted truncation would keep a
-            -- different subset each time and diff against itself. Sort so the kept subset is fixed.
+            -- pairs() order is not stable across walks; sort so a truncated walk keeps the same subset.
             table.sort(keys, function(a, b)
                 local ta, tb = type(a), type(b)
                 if ta ~= tb then return ta < tb end
@@ -259,16 +255,14 @@ function encodeValue(v, depth)
             local k = keys[i]
             out[type(k) == "number" and k or tostring(k)] = encodeValue(v[k], depth + 1)
         end
-        -- The count, not a flag: a truncated walk otherwise loses how much it dropped.
+        -- <more> is the dropped count.
         if n > MAX_ITEMS then out["<more>"] = n - MAX_ITEMS end
         return out
     end
     if tv == "userdata" then
         local kind = safe(function() return v:type() end)
         if kind == "FName" or kind == "FString" or kind == "FText" then
-            -- A failed ToString leaves only a description of the value. tostring(v) would embed a
-            -- fresh pointer on every walk and make an unchanged object diff non-empty, so use a
-            -- stable marker instead.
+            -- tostring(v) embeds a fresh pointer per walk and would diff as a change.
             return safe(function() return v:ToString() end) or ("<" .. kind .. ">")
         end
         if kind == "TArray" then return encodeArray(v, depth) end
@@ -364,19 +358,14 @@ function UEB.props(ref, includeSuper, readSoft, pattern)
 end
 
 -- Snapshots and diffs ---------------------------------------------------------------------
--- A snapshot is one UEB.props walk kept in memory under a caller-chosen label, so a later walk of
--- the same object can be compared against it ("what did pressing that button change?"). All four
--- ops are read-only: they never touch requireWrites, so they work with allow_writes = false.
---
--- The store lives on _G, not in a local, so UEB.reload() (which dofile()s this file) keeps it.
--- It is keyed by label, never by object address: an address is reused after a GC and would make
--- two unrelated objects look like one.
+-- A snapshot is one UEB.props walk kept under a label so a later walk can be diffed against it.
+-- Read-only: none of these ops touch requireWrites. Stored on _G so UEB.reload() (dofile) keeps
+-- it; keyed by label, not object address, since addresses are reused after GC.
 UEB_SNAPSHOTS = UEB_SNAPSHOTS or {}
 
--- Both sides of a diff come out of encodeValue, so the caps that shape it (MAX_DEPTH, MAX_ITEMS)
--- apply equally and a truncated tail encodes to the same "<N more>" marker on both walks. Only the
--- address of an object or struct is volatile between walks of unchanged state, so it is ignored:
--- object references compare by their encoded path string.
+-- Both sides of a diff come out of encodeValue with the same caps, so truncation markers match.
+-- Object and struct addresses are the only fields volatile between walks of unchanged state;
+-- object references compare by their encoded path.
 local function volatileKey(t, k)
     return k == "address" and (t.__object ~= nil or t.__struct ~= nil)
 end
@@ -416,8 +405,7 @@ diffValue = function(path, before, after, out)
         end
         return
     end
-    -- The userdata fallback is { __type = kind, str = tostring(v) }. Its `str` is descriptive, kept
-    -- for inspect_object, and carries a fresh pointer each walk, so only the kind is compared.
+    -- Userdata fallback { __type, str }: str embeds a pointer per walk, so compare __type only.
     if before.__type ~= nil and before.str ~= nil and after.__type ~= nil and after.str ~= nil then
         if tostring(before.__type) ~= tostring(after.__type) then
             out.changed[#out.changed + 1] = { path = path, before = before.__type, after = after.__type }
@@ -477,9 +465,8 @@ function UEB.snapshot(ref, label, includeSuper, pattern)
     return { label = label, path = walk.object, count = count, taken = taken }
 end
 
--- A diff result is returned as-is (see PREENCODED_OPS), so nothing downstream trims its row lists.
--- Cap them here, and only here, so each list always serialises as a JSON list and never grows a
--- "<more>" string key.
+-- Diff results skip the batch re-encode (PREENCODED_OPS); cap the row lists here so they always
+-- serialise as JSON lists.
 local MAX_DIFF_ROWS = 500
 
 local function capRows(out)
@@ -738,11 +725,9 @@ function UEB.dump(kind)
     return "dump " .. kind .. " written to the ue4ss directory"
 end
 
--- Ops whose result needs no second encodeValue pass: either it already went through one (props
--- encodes each property value; diff rows are built out of encoded walks) or it is plain scalars in
--- plain tables (funcs, objects, types). Re-encoding would re-apply MAX_DEPTH to values already
--- several levels deep and turn a list longer than MAX_ITEMS into a JSON object keyed "1".."200",
--- so UEB.batch passes these through as-is.
+-- Results that skip the batch re-encode: already encoded (props, the snapshot ops) or plain
+-- scalars in plain tables (funcs, objects, types). Re-encoding would re-apply MAX_DEPTH and turn
+-- a list longer than MAX_ITEMS into an object keyed "1".."200".
 local PREENCODED_OPS = { props = true, funcs = true, objects = true, types = true,
                          snapshot = true, diff = true, snapshots = true, forget = true }
 
@@ -750,14 +735,9 @@ local PREENCODED_OPS = { props = true, funcs = true, objects = true, types = tru
 -- available when allow_eval is off.
 local BATCH_OPS = {
     hello   = function(a) return UEB.hello() end,
-    -- reload re-reads settings.lua and re-runs this file in place (UEB.reload(), defined further
-    -- down, dofile()s MOD_PATH). It never touches requireWrites, so it works with allow_writes =
-    -- false and allow_eval = false, which is the point: it is how a user recovers after turning
-    -- eval off without a game restart. UEB.reload() runs synchronously on the same game thread
-    -- this batch handler is already on (ExecuteInGameThread in handle()), same as the eval path
-    -- that called it before this op existed, so it is safe here for the same reason. dofile
-    -- reassigns the global UEB table and bumps the global UEB_GENERATION; UEB.hello() below is
-    -- looked up fresh afterwards so it reports the settings now in effect, not the pre-reload ones.
+    -- Read-only on purpose: the recovery path when allow_eval is off. UEB.reload() dofile()s this
+    -- file on the game thread this handler already runs on; UEB.hello() is resolved after it so
+    -- the reply carries the new settings.
     reload  = function(a)
         local msg = UEB.reload()
         local info = UEB.hello()

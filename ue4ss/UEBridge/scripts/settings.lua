@@ -11,8 +11,7 @@ return {
 
     -- false refuses raw Lua (the eval_lua tool). The structured tools (inspect_object,
     -- get_property, find_objects, ...) keep working through the batch op.
-    -- allow_writes = false forces this off, whatever it is set to here, because eval can write;
-    -- the mod logs one line when it does.
+    -- Forced off when allow_writes = false (eval can write).
     allow_eval = true,
 
     -- false makes the bridge read-only: set_property, call_function, console_command and
