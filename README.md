@@ -1,7 +1,7 @@
 # ue-bridge
 
 [![PyPI version](https://img.shields.io/pypi/v/ue-bridge.svg)](https://pypi.org/project/ue-bridge/)
-[![PyPI Downloads](https://img.shields.io/pypi/dm/ue-bridge.svg)](https://pypistats.org/packages/ue-bridge)
+[![PyPI Downloads](https://static.pepy.tech/badge/ue-bridge/month)](https://pepy.tech/project/ue-bridge)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -255,11 +255,16 @@ protocol mismatch. Anything that can write a JSON file can be a client.
 ## Developing
 
 ```bash
+git clone https://github.com/littleRabbit94/ue-bridge.git
+cd ue-bridge
 uv venv --python 3.11 .venv
-uv pip install --python .venv\Scripts\python.exe "mcp>=1.8,<2"
-.venv\Scripts\python.exe -m ue_bridge status        # from the repo root
-python tools/build-release.py                       # dist/UEBridge-<version>.zip
+uv pip install --python .venv\Scripts\python.exe -e .   # the package and its one dependency (mcp)
+.venv\Scripts\python.exe -m ue_bridge status          # from the repo root
+python tools/build-release.py                         # dist/UEBridge-<version>.zip
 ```
+
+The mod half is `ue4ss/UEBridge/`; copy or link it into the game's `ue4ss\Mods\` to run the
+checkout rather than a release zip.
 
 Edit `ue4ss/UEBridge/scripts/main.lua`, then `ue-bridge reload`: the mod
 re-runs its source in place and retires the old poll loop, no relaunch.
@@ -268,4 +273,4 @@ re-runs its source in place and retires the old poll loop, no relaunch.
 
 - MIT. See [LICENSE](LICENSE).
 - Built on [RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) by the UE4SS-RE team (MIT).
-- Written with the assistance of an AI coding agent.
+- Written with an AI coding agent workflow.
