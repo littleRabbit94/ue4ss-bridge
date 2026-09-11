@@ -1,7 +1,7 @@
-# ue-bridge
+# ue4ss-bridge
 
-[![PyPI version](https://img.shields.io/pypi/v/ue-bridge.svg)](https://pypi.org/project/ue-bridge/)
-[![PyPI Downloads](https://static.pepy.tech/badge/ue-bridge/month)](https://pepy.tech/project/ue-bridge)
+[![PyPI version](https://img.shields.io/pypi/v/ue4ss-bridge.svg)](https://pypi.org/project/ue4ss-bridge/)
+[![PyPI Downloads](https://static.pepy.tech/badge/ue4ss-bridge/month)](https://pepy.tech/project/ue4ss-bridge)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -17,8 +17,8 @@ Two parts, released separately:
 
 | Part | What | Where it goes |
 |---|---|---|
-| **UEBridge** (Lua mod) | Polls `ue4ss\bridge\request.json`, runs the request on the game thread, writes `response.json`. Game-agnostic. | The game: `ue4ss\Mods\UEBridge\` ([GitHub release](https://github.com/littleRabbit94/ue-bridge/releases), [Dawnwalker Nexus](https://www.nexusmods.com/thebloodofdawnwalker/mods/198), [Laughless Saint Nexus](https://www.nexusmods.com/thelanternofthelaughlesssaint/mods/5)) |
-| **ue-bridge** (Python) | An MCP server and CLI that write those files and read the answers. Finds the running game by itself. | Your machine: `uvx ue-bridge` or `pip install ue-bridge` |
+| **UEBridge** (Lua mod) | Polls `ue4ss\bridge\request.json`, runs the request on the game thread, writes `response.json`. Game-agnostic. | The game: `ue4ss\Mods\UEBridge\` ([GitHub release](https://github.com/littleRabbit94/ue4ss-bridge/releases), [Dawnwalker Nexus](https://www.nexusmods.com/thebloodofdawnwalker/mods/198), [Laughless Saint Nexus](https://www.nexusmods.com/thelanternofthelaughlesssaint/mods/5)) |
+| **ue4ss-bridge** (Python) | An MCP server and CLI that write those files and read the answers. Finds the running game by itself. | Your machine: `uvx ue4ss-bridge` or `pip install ue4ss-bridge` |
 
 ## What it does
 
@@ -31,15 +31,19 @@ a variable, UEBridge runs your queries live on the engine's game thread:
   its current value, list the `UFunction`s on the class chain.
 - **Runtime manipulation.** Set properties, call `UFunction`s with arguments, evaluate raw Lua.
 - **Snapshot and diff.** Keep a property walk under a label, play, then ask what changed.
+- **Event streams.** Watch properties on a timer or hook a `UFunction`, play, then poll the events
+  that piled up while you did.
+- **Class hierarchy and aim.** List every loaded subclass of a base class; line-trace from the
+  camera to find out what the player is looking at.
 - **Engine commands and dumps.** Run console commands or trigger the UE4SS dumpers (`usmap`,
   `jmap`, `uht`, `cxx`, `actors`, `objects`, `static_meshes`) programmatically.
 
 ## How it works and the security model
 
 ```
-AI agent / script  ->  ue-bridge (MCP stdio or HTTP, or CLI)  ->  request.json
-                                                                 UEBridge mod: ExecuteInGameThread
-                       ue-bridge  <-  response.json           <-
+AI agent / script  ->  ue4ss-bridge (MCP stdio or HTTP, or CLI)  ->  request.json
+                                                                     UEBridge mod: ExecuteInGameThread
+                       ue4ss-bridge  <-  response.json            <-
 ```
 
 A minimal file-based IPC protocol:
@@ -56,11 +60,29 @@ A minimal file-based IPC protocol:
 - Only software already running on your PC with write access to the game folder can talk to it.
 
 **Compatibility.** Game-agnostic: any Unreal Engine title running UE4SS. UEBridge registers no
-native C++ hooks; its Lua runs entirely through engine-thread execution, so it is unaffected by
-the hook settings of your UE4SS build. Verified on:
+hooks of its own; its Lua runs entirely through engine-thread execution, so it is unaffected by
+the hook settings of your UE4SS build. `hook_function` registers a UE4SS hook only for the
+function you name, and only while you ask for it. Verified on:
 
 - *The Lantern of the Laughless Saint* (Steam build, UE 5.8, project `The_Holy_Fool`)
 - *The Blood of Dawnwalker* (Steam build, UE 5.5.4)
+
+## Renamed from ue-bridge
+
+**Why.** The old name collided with [grapeot/ue-bridge](https://github.com/grapeot/ue-bridge), an
+Unreal *Editor* TCP bridge, and the new name says what the tool needs: UE4SS.
+
+**What changed.** The PyPI package is `ue4ss-bridge`, the Python module is `ue4ss_bridge`, and the
+command is `ue4ss-bridge`. Environment variables are `UE4SS_BRIDGE_GAME_DIR` and
+`UE4SS_BRIDGE_DATA_DIR`.
+
+**What did not.** The mod folder is still `ue4ss\Mods\UEBridge\`, `settings.lua` keeps its keys and
+its place, the `UEB` helper table keeps its name, the log prefix is still `[UEBridge]`, and the
+request/response file layout is unchanged.
+
+**Nothing to update.** `ue-bridge` is still installed as a command alias, so an existing MCP
+client config keeps launching. The old environment variable names are still read. `pip install -U
+ue-bridge` keeps working: that package is now a stub that depends on `ue4ss-bridge`.
 
 ## Requirements
 
@@ -82,7 +104,7 @@ The archive carries the folder path, so the files land in `ue4ss\Mods\UEBridge\`
 **2. Verify.** Launch the game and check `ue4ss\UE4SS.log` for:
 
 ```
-[UEBridge] v1.1.0 ready
+[UEBridge] v1.2.0 ready
 ```
 
 **3. Uninstall.** Delete `ue4ss\Mods\UEBridge\` and, if present, `ue4ss\bridge\`.
@@ -91,51 +113,52 @@ The archive carries the folder path, so the files land in `ue4ss\Mods\UEBridge\`
 
 That copy always wins. A `settings.lua` at the mod root (where 1.0.0 put it) is read only when
 `scripts\` has none, and the mod logs one line naming it as ignored when both exist, so delete
-the root file after an in-place upgrade. Edit, save, then `ue-bridge reload` (or the `reload_mod`
+the root file after an in-place upgrade. Edit, save, then `ue4ss-bridge reload` (or the `reload_mod`
 tool), or restart the game.
 
 | Key | Default | Effect |
 |---|---|---|
 | `enabled` | `true` | `false` disables the bridge without uninstalling; nothing is polled |
-| `allow_writes` | `true` | `false` is strict read-only: `set_property`, `call_function`, `console_command` and `eval_lua` are refused |
+| `allow_writes` | `true` | `false` is strict read-only: `set_property`, `call_function`, `console_command`, `hook_function` and `eval_lua` are refused |
 | `allow_eval` | `true` | `false` refuses raw Lua (`eval_lua`); the structured inspection tools keep working |
 | `poll_ms` | `50` | request file check interval in milliseconds (50 is the floor; lower values are clamped) |
 | `bridge_dir` | unset | absolute path override for the request/response folder |
 
 ## Connect a tool or an AI agent (the MCP server)
 
-The program that writes and reads the IPC files is **ue-bridge**, a small Python package. It
+The program that writes and reads the IPC files is **ue4ss-bridge**, a small Python package. It
 finds any running UE4SS game on its own (an exe in a `Binaries\Win64` folder with `ue4ss\` beside
-it), so there are no paths to configure. Pass `--game-dir` or set `UE_BRIDGE_GAME_DIR` to pin one.
+it), so there are no paths to configure. Pass `--game-dir` or set `UE4SS_BRIDGE_GAME_DIR` to pin
+one. The pre-1.2.0 `UE_BRIDGE_GAME_DIR` and `UE_BRIDGE_DATA_DIR` are still read as a fallback.
 
 **Install**
 
 ```bash
-uvx ue-bridge
+uvx ue4ss-bridge
 ```
 
 or with pip:
 
 ```bash
-pip install ue-bridge
+pip install ue4ss-bridge
 ```
 
 **Quick check.** With the game up and the mod loaded:
 
 ```bash
-uvx ue-bridge status
+uvx ue4ss-bridge status
 ```
 
 ```
 game: The_Holy_Fool | process: The_Holy_Fool-Win64-Shipping.exe | running: True | bridge dir: C:\...\Binaries\Win64\ue4ss\bridge
 ```
 
-`uvx ue-bridge hello` returns the mod's version, protocol and permissions.
+`uvx ue4ss-bridge hello` returns the mod's version, protocol and permissions.
 
 ### Claude Code
 
 ```bash
-claude mcp add ue-bridge -- uvx ue-bridge
+claude mcp add ue4ss-bridge -- uvx ue4ss-bridge
 ```
 
 ### Claude Desktop
@@ -146,9 +169,9 @@ Add this to `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows,
 ```json
 {
   "mcpServers": {
-    "ue-bridge": {
+    "ue4ss-bridge": {
       "command": "uvx",
-      "args": ["ue-bridge"]
+      "args": ["ue4ss-bridge"]
     }
   }
 }
@@ -156,29 +179,36 @@ Add this to `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows,
 
 ### Cursor and other MCP clients
 
-Pass `uvx ue-bridge` (or, with pip, `ue-bridge` / `python -m ue_bridge`) as the MCP server
+Pass `uvx ue4ss-bridge` (or, with pip, `ue4ss-bridge` / `python -m ue4ss_bridge`) as the MCP server
 command. Cursor reads `.cursor/mcp.json` in the project root, or Cursor Settings > Features > MCP;
 Windsurf, Continue, VS Code and Codex each take the same JSON block in their MCP settings file.
 
 ### HTTP (one long-running server, several clients)
 
-`ue-bridge --http` serves streamable-HTTP MCP on `http://127.0.0.1:8930/mcp`, loopback only
+`ue4ss-bridge --http` serves streamable-HTTP MCP on `http://127.0.0.1:8930/mcp`, loopback only
 (`--port` changes the port):
 
 ```bash
-claude mcp add --transport http ue-bridge http://127.0.0.1:8930/mcp
+claude mcp add --transport http ue4ss-bridge http://127.0.0.1:8930/mcp
 ```
 
 ### Shell, for scripts and for testing the channel
 
 ```bash
-ue-bridge status
-ue-bridge hello
-ue-bridge eval "return UEB.world()"
-ue-bridge props first:PlayerController
-ue-bridge types ^Narrative
-ue-bridge snapshot first:PlayerController before --super   # --super: include inherited properties (props too)
-ue-bridge diff before                       # or: diff <ref> <label> for another object
+ue4ss-bridge status
+ue4ss-bridge hello
+ue4ss-bridge eval "return UEB.world()"
+ue4ss-bridge props first:PlayerController
+ue4ss-bridge types ^Narrative
+ue4ss-bridge subclasses /Script/Engine.Pawn
+ue4ss-bridge target 5000                    # what the camera is pointed at
+ue4ss-bridge snapshot first:PlayerController before --super   # --super: include inherited properties (props too)
+ue4ss-bridge diff before                    # or: diff <ref> <label> for another object
+ue4ss-bridge watch first:PlayerController Pawn pawnwatch --interval 100
+ue4ss-bridge hook /Script/Engine.PlayerController:ClientRestart restarts
+ue4ss-bridge events                         # or: events <label>
+ue4ss-bridge streams
+ue4ss-bridge unwatch pawnwatch              # or: unwatch "*"
 ```
 
 ### Example prompts
@@ -189,6 +219,9 @@ Once an agent is connected, ask it about the running game in plain language:
 - "Which enemy characters are spawned in the world right now?"
 - "What UFunctions on the player controller relate to movement, interaction or camera?"
 - "Snapshot the player controller, then tell me what changed after I open the map."
+- "Watch the player pawn's health, then tell me every time it dropped while I fought."
+- "What am I looking at right now, and which materials are on it?"
+- "List every Blueprint class derived from the enemy base class."
 - "Set the player's walk speed to 1200."
 - "Trigger a USMAP dump so I can open the cooked assets in FModel."
 
@@ -210,6 +243,12 @@ Once an agent is connected, ask it about the running game in plain language:
 | `diff_object(label, ref, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. `ref` defaults to the snapshot's own reference. At most 500 rows per list, with a `truncated` count when that bites. Read-only. |
 | `list_snapshots()` | Labels held, with object path, wall-clock `taken` timestamp (whole seconds since the epoch) and property count. Read-only. |
 | `forget_snapshot(label)` | Drop one snapshot, or all with `"*"`. Read-only. |
+| `list_subclasses(ref, limit, pattern)` | Every loaded class derived from a base class, Blueprint classes included: `{base, count, types}` with `{name, kind, path, parent}` rows sorted by path. Read-only; about 1.5 s. |
+| `targeted_actor(distance, channel, ref)` | Line trace from the camera (or from `ref`'s own location and forward vector): the actor, component, impact point and normal, bone, physical material and materials hit. Read-only. |
+| `watch_property(ref, names, label, interval_ms, every)` | Sample properties on a timer and record every change under a label. Read-only. |
+| `hook_function(function, label, max_args)` | Record every call of a `UFunction` with its parameters. Counts as a write. |
+| `poll_events(since, label, limit, clear)` | Drain what the watches and hooks recorded: `{events, next, dropped, buffered}`. Read-only. |
+| `list_streams()` / `stop_stream(label)` | Watches and hooks running / stop one, or all with `"*"`. |
 | `reload_mod()` | Re-read `settings.lua` and re-run the mod in place, no game restart. Read-only, so it is the way back after `allow_eval` was turned off. |
 | `batch(calls)` | Several of the above in one round trip. |
 | `dump(kind)` | UE4SS dumpers: `usmap`, `jmap`, `uht`, `cxx`, `actors`, `objects`, `static_meshes`. |
@@ -232,11 +271,19 @@ survive `UEB.reload()` and are lost when the game exits. A diff ignores object a
 addresses and uses the same depth and array caps as the original walk, so an unchanged object
 diffs empty.
 
-## Wire protocol (2)
+**Streams** (watches and hooks) also live in the game process and survive `UEB.reload()`. They
+share one buffer of 2000 events with a rising sequence number; `poll_events` reports `dropped`
+when the cap evicted rows before you read them. Labels are unique, and a watch re-resolves its
+reference on every pass, so it follows `first:PlayerController` across respawns and stops itself
+with a `lost` event when the reference goes away. A hook's callback copies parameters and nothing
+else: calling a hooked function from `eval_lua` in the same session has crashed the game, so read
+hook output through `poll_events`.
+
+## Wire protocol (3)
 
 ```
 request : {"id": str, "op": "hello"|"ping"|"eval"|"batch", "code": str, "calls": [ {op, ...} ]}
-response: {"id", "ok": bool, "result", "output": [str], "error": str|null, "ms": int, "protocol": 2}
+response: {"id", "ok": bool, "result", "output": [str], "error": str|null, "ms": int, "protocol": 3}
 ```
 
 `hello` returns the mod's version, protocol and permissions; the server refuses to proceed on a
@@ -255,18 +302,18 @@ protocol mismatch. Anything that can write a JSON file can be a client.
 ## Developing
 
 ```bash
-git clone https://github.com/littleRabbit94/ue-bridge.git
-cd ue-bridge
+git clone https://github.com/littleRabbit94/ue4ss-bridge.git
+cd ue4ss-bridge
 uv venv --python 3.11 .venv
 uv pip install --python .venv\Scripts\python.exe -e .   # the package and its one dependency (mcp)
-.venv\Scripts\python.exe -m ue_bridge status          # from the repo root
-python tools/build-release.py                         # dist/UEBridge-<version>.zip
+.venv\Scripts\python.exe -m ue4ss_bridge status       # from the repo root
+python tools/build-release.py                         # dist/ue4ss-bridge-<version>.zip
 ```
 
 The mod half is `ue4ss/UEBridge/`; copy or link it into the game's `ue4ss\Mods\` to run the
 checkout rather than a release zip.
 
-Edit `ue4ss/UEBridge/scripts/main.lua`, then `ue-bridge reload`: the mod
+Edit `ue4ss/UEBridge/scripts/main.lua`, then `ue4ss-bridge reload`: the mod
 re-runs its source in place and retires the old poll loop, no relaunch.
 
 ## Credits and license

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ue-bridge"
-version = "1.1.0"
-description = "Talk to a running UE4SS game: inspect objects, call functions, run Lua, while it plays. An MCP server and CLI plus the UEBridge mod."
+name = "ue4ss-bridge"
+version = "1.2.0"
+description = "Talk to a running UE4SS game: inspect objects, call functions, watch properties, hook functions, run Lua, while it plays. An MCP server and CLI plus the UEBridge mod."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -20,13 +20,15 @@ classifiers = [
 dependencies = ["mcp>=1.8,<2"]
 
 [project.scripts]
-ue-bridge = "ue_bridge.server:main"
+ue4ss-bridge = "ue4ss_bridge.server:main"
+# Compatibility alias: MCP client configs written against the old name keep launching.
+ue-bridge = "ue4ss_bridge.server:main"
 
 [project.urls]
-Source = "https://github.com/littleRabbit94/ue-bridge"
+Source = "https://github.com/littleRabbit94/ue4ss-bridge"
 
 [tool.hatch.build.targets.wheel]
-packages = ["ue_bridge"]
+packages = ["ue4ss_bridge"]
 
 [tool.hatch.build.targets.sdist]
-include = ["ue_bridge", "ue4ss", "README.md", "CHANGELOG.md", "LICENSE"]
+include = ["ue4ss_bridge", "ue4ss", "README.md", "CHANGELOG.md", "LICENSE"]

@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.2.0 (2026-09-11)
+
+**Renamed to ue4ss-bridge.** The old name collided with grapeot/ue-bridge, an Unreal Editor TCP
+bridge, and the new one says what the tool needs.
+
+- The PyPI package is `ue4ss-bridge`, the Python module is `ue4ss_bridge`, and the command is
+  `ue4ss-bridge`. `argparse` and `--version` print the new name.
+- `ue-bridge` stays installed as a second console script pointing at the same entry point, so an
+  MCP client config written against the old name keeps launching. `pip install -U ue-bridge`
+  keeps working: that package is now a stub that depends on `ue4ss-bridge`.
+- The server reads `UE4SS_BRIDGE_GAME_DIR` and `UE4SS_BRIDGE_DATA_DIR`, falling back to the old
+  `UE_BRIDGE_GAME_DIR` / `UE_BRIDGE_DATA_DIR`.
+- The FastMCP server name is `ue4ss-bridge`; the source URL is
+  https://github.com/littleRabbit94/ue4ss-bridge (GitHub redirects the old one).
+- Unchanged, so nothing in the game needs touching: the mod folder `ue4ss\Mods\UEBridge\`, the
+  `UEB` helper table, the `[UEBridge]` log prefix, `settings.lua` and its keys, and the
+  request/response file layout.
+- `tools/build-release.py` now writes `dist/ue4ss-bridge-<version>.zip`; the folder inside the
+  archive is still `ue4ss/Mods/UEBridge/`.
+
+**Event streams.** Watch a property or hook a function, play, then poll what piled up.
+
+- New `watch` batch op and `watch_property` MCP tool (CLI: `watch <ref> <prop> <label>
+  [--interval ms]`) sample one property or a list of them on a timer and record an event whenever
+  a value changes. `every = true` records every sample instead.
+- The sampler re-resolves the reference on every pass rather than caching the object, so a watch
+  on `first:PlayerController` follows a respawn, and a cached object that faults on the first
+  frame after a save reload cannot take the game down.
+- When the reference stops resolving, the watch records one `{kind: "stream", event: "lost"}` row
+  and stops itself instead of spinning, which is what a map transition looks like.
+- `interval_ms` is clamped to at least 16, about one frame; one sample is in flight at a time, so
+  a slow game thread does not queue overlapping closures.
+- New `hook` batch op and `hook_function` MCP tool (CLI: `hook <fnpath> <label>`) record every
+  call of a UFunction with up to `max_args` parameters (default 8) and the calling object's name.
+  The callback copies values and does nothing else. A hook registers cleanly, but an eval that
+  then CALLED the hooked function crashed the game with an access violation, so read hook output
+  through `poll_events` and do not call a hooked function from eval in the same session.
+- Hooking goes through `requireWrites`, since a hook intercepts game code: it is refused with
+  `allow_writes = false`. Watches are read-only.
+- New `events` batch op and `poll_events` MCP tool (CLI: `events [label]`) drain the buffer:
+  `since` is an exclusive sequence number, `label` filters to one stream, `clear` drops the rows
+  returned. Returns `{events, next, dropped, buffered}`.
+- One buffer of 2000 events is shared by every stream, with a rising `seq` per event and a
+  `dropped` counter for what the cap evicted. Rows are keyed by `seq`, so eviction is O(1) and a
+  client can ask for everything after a sequence number it already has.
+- New `streams` and `unwatch` batch ops and the `list_streams` / `stop_stream` MCP tools (CLI:
+  `streams`, `unwatch <label>`). `unwatch "*"` stops everything; stopping a hook unregisters it.
+- Reusing a label errors rather than silently replacing a running stream.
+- Streams and their events live on `_G`, so `UEB.reload()` keeps them, as it does snapshots.
+
+**What the player is looking at.** New `target` batch op and `targeted_actor` MCP tool (CLI:
+`target [distance]`).
+
+- A line trace from the player camera along its forward vector, returning `{hit, actor,
+  actor_class, component, component_class, distance, impact_point, impact_normal, bone,
+  phys_material, materials}`. A miss returns `{hit: false}` alone.
+- `distance` is in centimetres (default 5000) and `channel` selects the trace channel
+  (0 = Visibility, 1 = Camera).
+- `ref` traces from that actor's own `K2_GetActorLocation()` along its `GetActorForwardVector()`
+  instead of the camera, which is how to ask what an NPC faces.
+- The actor is the hit component's owner; `materials` are the component's material full names
+  (first 32) when it exposes `GetMaterials`.
+- Read-only: it calls const getters and the trace, so it works with `allow_writes = false`. Each
+  engine call writes its own `lastop.log` line, so a native crash names the stage that caused it.
+
+**Subclasses.** New `subclasses` batch op and `list_subclasses` MCP tool (CLI:
+`subclasses <class>`).
+
+- Every loaded class derived from a base class, Blueprint classes included. The engine keeps no
+  reverse index, so this walks every UObject and tests `IsChildOf`: about 1.5 s on a large game,
+  hence a 30 s timeout.
+- `ref` is a class path such as `/Script/Engine.PlayerController`; an object that is not a `Class`
+  or `BlueprintGeneratedClass` is an error rather than an empty result.
+- Returns `{base, count, types}` with `{name, kind, path, parent}` rows, `parent` being the
+  immediate super class's short name. The base itself is excluded, `pattern` filters on the short
+  name, and rows are sorted by path so two runs agree.
+
+**Other**
+
+- `UEHelpers` is now in the eval environment. It was a file local in `main.lua` and unreachable
+  from an eval chunk, which failed with `attempt to index a nil value (global 'UEHelpers')`.
+- Protocol bumped to 3 on both sides.
+
 ## 1.1.0 (2026-09-07)
 
 - New `reload` batch op and `reload_mod` MCP tool (CLI: `ue-bridge reload`) re-read `settings.lua` and re-run the mod in place via `UEB.reload()`. It bypasses `requireWrites`, so it is the way to recover after `allow_eval` was turned off without a game restart: eval was the only path to `UEB.reload()` before, and eval itself is refused when `allow_eval = false`.

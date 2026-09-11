@@ -1,24 +1,32 @@
-"""ue-bridge: MCP server and CLI that talk to a running UE4SS game through the UEBridge Lua mod.
+"""ue4ss-bridge: MCP server and CLI that talk to a running UE4SS game through the UEBridge Lua mod.
 
 Transport is two files in <game>\\Binaries\\Win64\\ue4ss\\bridge\\ (request.json / response.json).
 The Lua mod polls the request file, runs the request on the game thread, and writes the response.
 Nothing here needs sockets or admin rights, and nothing here names a particular game: the game is
 found by looking for a running exe in a Binaries\\Win64 folder that has ue4ss\\ beside it.
 
-Run as an MCP server (stdio):   ue-bridge                (or: python -m ue_bridge)
-Run as an MCP server (HTTP):    ue-bridge --http [--port 8930]
-Run from a shell:               ue-bridge ping | hello | status | world | reload
-                                ue-bridge eval "return UEB.world()"
-                                ue-bridge props <ref> [--super] | funcs <ref> | objects <Class>
-                                ue-bridge types [pattern] | console <cmd>
-                                ue-bridge snapshot <ref> <label> [--super] | diff [<ref>] <label>
+Run as an MCP server (stdio):   ue4ss-bridge            (or: python -m ue4ss_bridge)
+Run as an MCP server (HTTP):    ue4ss-bridge --http [--port 8930]
+Run from a shell:               ue4ss-bridge ping | hello | status | world | reload
+                                ue4ss-bridge eval "return UEB.world()"
+                                ue4ss-bridge props <ref> [--super] | funcs <ref> | objects <Class>
+                                ue4ss-bridge types [pattern] | subclasses <Class> | console <cmd>
+                                ue4ss-bridge target [distance]
+                                ue4ss-bridge snapshot <ref> <label> [--super] | diff [<ref>] <label>
                                   --super includes inherited properties (props, snapshot)
-                                ue-bridge snapshots | forget <label>
+                                ue4ss-bridge snapshots | forget <label>
+                                ue4ss-bridge watch <ref> <prop> <label> [--interval ms]
+                                ue4ss-bridge hook <fnpath> <label>
+                                ue4ss-bridge events [label] | streams | unwatch <label>
+
+`ue-bridge` is a compatibility alias for the same command.
 
 Configuration, all optional, first match wins:
-  --game-dir PATH / UE_BRIDGE_GAME_DIR   the game root or any folder under it
-  UE_BRIDGE_DATA_DIR                     the bridge folder itself (request/response files)
-  otherwise                              discovered from the running game process
+  --game-dir PATH / UE4SS_BRIDGE_GAME_DIR   the game root or any folder under it
+  UE4SS_BRIDGE_DATA_DIR                     the bridge folder itself (request/response files)
+  otherwise                                 discovered from the running game process
+
+The pre-1.2.0 names UE_BRIDGE_GAME_DIR and UE_BRIDGE_DATA_DIR are still read, as a fallback.
 """
 from __future__ import annotations
 
@@ -35,7 +43,7 @@ from typing import Any
 
 from . import __version__
 
-PROTOCOL = 2
+PROTOCOL = 3
 DEFAULT_TIMEOUT = 15.0
 # An unconsumed request.json older than this is a leftover from a dead game, not a call in flight.
 STALE_REQUEST_S = 10.0
@@ -126,9 +134,14 @@ def _game_exe_in(win64: Path) -> Path | None:
     return named if named.is_file() else None
 
 
+def _env(name: str) -> str | None:
+    """UE4SS_BRIDGE_* first; the pre-1.2.0 UE_BRIDGE_* names stay readable so old configs work."""
+    return os.environ.get(f"UE4SS_BRIDGE_{name}") or os.environ.get(f"UE_BRIDGE_{name}")
+
+
 def locate_game(game_dir: str | None = None) -> Game:
-    data_dir = os.environ.get("UE_BRIDGE_DATA_DIR")
-    game_dir = game_dir or os.environ.get("UE_BRIDGE_GAME_DIR")
+    data_dir = _env("DATA_DIR")
+    game_dir = game_dir or _env("GAME_DIR")
 
     if game_dir:
         win64 = _find_win64(Path(game_dir))
@@ -150,7 +163,7 @@ def locate_game(game_dir: str | None = None) -> Game:
         return Game(exe=None, process=None, project=None, bridge_dir=Path(data_dir))
     raise BridgeError(
         "no running Unreal game found and no location configured. Start the game, or pass "
-        "--game-dir / set UE_BRIDGE_GAME_DIR to the game's install folder."
+        "--game-dir / set UE4SS_BRIDGE_GAME_DIR to the game's install folder."
     )
 
 
@@ -159,7 +172,7 @@ _GAME_DIR_ARG: str | None = None
 
 
 def _pinned() -> bool:
-    return bool(_GAME_DIR_ARG or os.environ.get("UE_BRIDGE_GAME_DIR") or os.environ.get("UE_BRIDGE_DATA_DIR"))
+    return bool(_GAME_DIR_ARG or _env("GAME_DIR") or _env("DATA_DIR"))
 
 
 def game() -> Game:
@@ -357,7 +370,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     from mcp.server.fastmcp import FastMCP
 
     mcp = FastMCP(
-        "ue-bridge",
+        "ue4ss-bridge",
         instructions=(
             "Live bridge into a running Unreal Engine game via UE4SS. Every tool runs on the game "
             "thread of the running game. Call bridge_status first. Object references are full paths "
@@ -405,8 +418,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         UEB.funcs(ref), UEB.get(ref, name), UEB.set(ref, name, value), UEB.call(ref, fn, args),
         UEB.objects(class, limit), UEB.types(pattern, limit), UEB.console(cmd), UEB.world(),
         UEB.dump(kind), UEB.snapshot(ref, label), UEB.diff(ref, label), UEB.snapshots(),
-        UEB.forget(label). print() output is captured and returned alongside the result. Refused when
-        the mod's settings.lua sets allow_eval = false; the other tools keep working.
+        UEB.forget(label), UEB.subclasses(ref, limit, pattern), UEB.target(distance, channel, ref),
+        UEB.watch(ref, names, label, interval_ms, every), UEB.hook(fnpath, label, max_args),
+        UEB.events(since, label, limit, clear), UEB.streams(), UEB.unwatch(label). UEHelpers is in
+        scope too. print() output is captured and returned alongside the result. Refused when the
+        mod's settings.lua sets allow_eval = false; the other tools keep working.
         """
         return _unwrap(eval_lua(code, timeout))
 
@@ -429,6 +445,97 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     def list_types(pattern: str = "", limit: int = 200) -> dict:
         """Loaded reflected types whose name matches a Lua pattern (empty = all). Walks GUObjectArray (~400 ms)."""
         return one("types", timeout=30, pattern=pattern or None, limit=int(limit))
+
+    @mcp.tool()
+    def list_subclasses(ref: str, limit: int = 200, pattern: str | None = None) -> dict:
+        """Every loaded class derived from a base class, Blueprint classes included.
+
+        ref is a class path ('/Script/Engine.PlayerController'); passing an object that is not a
+        Class or BlueprintGeneratedClass raises. The base itself is excluded. pattern is an
+        optional Lua pattern matched against the short name.
+
+        Returns {base, count, types}, where count is the number of matches before `limit` and each
+        row is {name, kind, path, parent} with parent the immediate super class's short name. Rows
+        are sorted by path. The engine keeps no reverse index, so this walks every UObject and
+        tests IsChildOf: about 1.5 s on a large game.
+        """
+        return one("subclasses", timeout=30, ref=ref, limit=int(limit), pattern=pattern)
+
+    @mcp.tool()
+    def targeted_actor(distance: float = 5000, channel: int = 0, ref: str | None = None) -> dict:
+        """What the player is looking at: a line trace from the camera along its forward vector.
+
+        distance is in centimetres (the engine's unit), default 5000. channel is a trace channel:
+        0 = Visibility, 1 = Camera. ref traces from that actor's own location and forward vector
+        instead of the camera, which is how you ask what an NPC faces.
+
+        Returns {hit} alone on a miss, otherwise {hit, actor, actor_class, component,
+        component_class, distance, impact_point, impact_normal, bone, phys_material, materials}.
+        actor is the hit component's owner; materials are the component's material full names
+        (first 32) when it exposes GetMaterials. Read-only: it works with allow_writes = false.
+        """
+        return one("target", timeout=30, distance=float(distance), channel=int(channel), ref=ref)
+
+    @mcp.tool()
+    def watch_property(ref: str, names: list[str] | str, label: str,
+                       interval_ms: int = 100, every: bool = False) -> dict:
+        """Sample properties on a timer and record an event whenever a value changes. Read-only.
+
+        names is one property name or a list. interval_ms is clamped to at least 16 (about one
+        frame). every=True records every sample instead of only changes. Read the results with
+        poll_events; nothing is pushed.
+
+        The watch re-resolves ref on every pass, so it follows a reference such as
+        'first:PlayerController' across respawns. If the reference stops resolving (usually a map
+        transition) it records one {kind: "stream", event: "lost"} row and stops itself.
+
+        Labels are unique: reusing one raises. Stop a watch with stop_stream.
+        """
+        return one("watch", ref=ref, names=names, label=label,
+                   interval_ms=int(interval_ms), every=bool(every))
+
+    @mcp.tool()
+    def hook_function(function: str, label: str, max_args: int = 8) -> dict:
+        """Record every call of a UFunction, with its parameters. Counts as a write.
+
+        function is a UFunction path ('/Script/Engine.PlayerController:ClientRestart').
+        max_args caps how many parameters are copied per call (default 8). Read the calls with
+        poll_events.
+
+        The callback copies parameters and the calling object's name and does nothing else. A
+        native hook registers cleanly, but an eval that then CALLS the hooked function crashed the
+        game with an access violation, so read hook output through poll_events and do not call a
+        hooked function from eval_lua in the same session.
+
+        Hooking intercepts game code, so it is refused when allow_writes = false. Stop a hook with
+        stop_stream, which unregisters it.
+        """
+        return one("hook", **{"function": function}, label=label, max_args=int(max_args))
+
+    @mcp.tool()
+    def poll_events(since: int = 0, label: str | None = None,
+                    limit: int = 500, clear: bool = False) -> dict:
+        """Drain events recorded by watches and hooks. Read-only.
+
+        since is a sequence number, exclusive: pass back the `next` from the previous call to get
+        only what is new. label filters to one stream. clear=True drops the returned rows.
+
+        Returns {events, next, dropped, buffered}. Each row is {seq, t, label, kind} plus, for a
+        watch, {path, before, after}, and for a hook, {fn, self, args}. The buffer holds 2000
+        events across all streams; `dropped` counts what the cap evicted before you read it.
+        """
+        return one("events", timeout=30, since=int(since), label=label,
+                   limit=int(limit), clear=bool(clear))
+
+    @mcp.tool()
+    def list_streams() -> dict:
+        """Watches and hooks currently running: {label, kind, target, interval_ms, events, started, active}. Read-only."""
+        return one("streams")
+
+    @mcp.tool()
+    def stop_stream(label: str) -> dict:
+        """Stop one watch or hook by label, or all of them with label="*". Unregisters a hook."""
+        return one("unwatch", label=label)
 
     @mcp.tool()
     def inspect_object(ref: str, include_super: bool = False, pattern: str | None = None) -> dict:
@@ -540,6 +647,13 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
           {"op": "forget",    "label": str}
           {"op": "objects", "class_name": ..., "limit": int}
           {"op": "types",   "pattern": ..., "limit": int}
+          {"op": "subclasses", "ref": <class path>, "limit": int, "pattern": str}
+          {"op": "target",  "distance": num, "channel": int, "ref": ... (optional)}
+          {"op": "watch",   "ref": ..., "names": [str], "label": str, "interval_ms": int, "every": bool}
+          {"op": "hook",    "function": <fn path>, "label": str, "max_args": int}
+          {"op": "events",  "since": int, "label": str, "limit": int, "clear": bool}
+          {"op": "streams"}
+          {"op": "unwatch", "label": str}
           {"op": "console", "command": ...}
           {"op": "dump",    "kind": ...}
 
@@ -572,6 +686,14 @@ def _cli(cmd: str, rest: list[str]) -> int:
     # --super includes inherited properties (props, snapshot); a BP_* child class declares few of its own.
     include_super = "--super" in rest
     rest = [r for r in rest if r != "--super"]
+    interval_ms = 100
+    if "--interval" in rest:
+        i = rest.index("--interval")
+        if len(rest) <= i + 1:
+            print("bridge error: --interval needs a value in milliseconds", file=sys.stderr)
+            return 1
+        interval_ms = int(rest[i + 1])
+        del rest[i:i + 2]
 
     def arg(i: int, what: str) -> str:
         if len(rest) <= i:
@@ -619,6 +741,25 @@ def _cli(cmd: str, rest: list[str]) -> int:
             print(json.dumps(one("objects", class_name=arg(0, "a class name")), indent=1))
         elif cmd == "types":
             print(json.dumps(one("types", 30, pattern=rest[0] if rest else None), indent=1))
+        elif cmd == "subclasses":
+            print(json.dumps(one("subclasses", 30, ref=arg(0, "a class path"),
+                                 pattern=rest[1] if len(rest) > 1 else None), indent=1))
+        elif cmd == "target":
+            print(json.dumps(one("target", 30, distance=float(rest[0]) if rest else 5000.0), indent=1))
+        elif cmd == "watch":
+            print(json.dumps(one("watch", ref=arg(0, "an object reference"),
+                                 names=[arg(1, "a property name")],
+                                 label=arg(2, "a stream label"),
+                                 interval_ms=interval_ms), indent=1))
+        elif cmd == "hook":
+            print(json.dumps(one("hook", **{"function": arg(0, "a UFunction path")},
+                                 label=arg(1, "a stream label")), indent=1))
+        elif cmd == "events":
+            print(json.dumps(one("events", 30, label=rest[0] if rest else None), indent=1))
+        elif cmd == "streams":
+            print(json.dumps(one("streams"), indent=1))
+        elif cmd == "unwatch":
+            print(json.dumps(one("unwatch", label=arg(0, "a stream label, or \"*\" for all")), indent=1))
         elif cmd == "console":
             print(json.dumps(one("console", command=" ".join(rest)), indent=1))
         elif cmd == "status":
@@ -638,12 +779,12 @@ def _cli(cmd: str, rest: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     global _GAME_DIR_ARG
-    parser = argparse.ArgumentParser(prog="ue-bridge", add_help=True,
+    parser = argparse.ArgumentParser(prog="ue4ss-bridge", add_help=True,
                                      description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--game-dir", help="game install folder (or any folder under it); default: discover the running game")
     parser.add_argument("--http", action="store_true", help="serve MCP over streamable HTTP on localhost instead of stdio")
     parser.add_argument("--port", type=int, default=8930, help="port for --http (default 8930)")
-    parser.add_argument("--version", action="version", version=f"ue-bridge {__version__} (protocol {PROTOCOL})")
+    parser.add_argument("--version", action="version", version=f"ue4ss-bridge {__version__} (protocol {PROTOCOL})")
     parser.add_argument("command", nargs="?", help="CLI command; omit to run the MCP server")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     ns = parser.parse_args(argv)

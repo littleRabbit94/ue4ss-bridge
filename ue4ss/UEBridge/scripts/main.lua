@@ -1,4 +1,4 @@
--- UEBridge: a file-based request/response channel so an external process (the ue-bridge MCP
+-- UEBridge: a file-based request/response channel so an external process (the ue4ss-bridge MCP
 -- server, or anything else that can write a file) can run Lua inside a live UE4SS game without a
 -- relaunch per question. Game-agnostic: nothing here names a game or an install path.
 --
@@ -9,17 +9,18 @@
 -- file exists. All game-object access happens inside ExecuteInGameThread. The mod opens no
 -- sockets and starts no processes; everything it does is in reply to a file in its own folder.
 --
--- Wire format (protocol 2)
+-- Wire format (protocol 3)
 --   request : {"id": string, "op": "hello"|"ping"|"eval"|"batch", "code": string, "calls": [..]}
 --   response: {"id", "ok": bool, "result": any, "output": [string], "error": string|null,
---              "ms": n, "protocol": 2}
+--              "ms": n, "protocol": 3}
 --
--- Eval snippets run in an environment that inherits _G plus the UEB helper table below. Whatever
--- the chunk returns is serialised: UObjects become {"__object": fullname, "address": n}, FName /
--- FString become strings, TArrays become lists, structs are walked through their reflected type.
+-- Eval snippets run in an environment that inherits _G plus the UEB helper table below and
+-- UEHelpers. Whatever the chunk returns is serialised: UObjects become {"__object": fullname,
+-- "address": n}, FName / FString become strings, TArrays become lists, structs are walked
+-- through their reflected type.
 
-local VERSION = "1.1.0"
-local PROTOCOL = 2
+local VERSION = "1.2.0"
+local PROTOCOL = 3
 local MOD_NAME = "UEBridge"
 
 -- Paths -----------------------------------------------------------------------------------
@@ -51,7 +52,7 @@ end
 --   enabled       false turns the bridge off without removing the mod.
 --   poll_ms       how often the request file is checked.
 --   allow_eval    false refuses raw Lua ("eval"); the structured "batch" ops still work.
---   allow_writes  false refuses anything that changes state: set, call, console, and eval.
+--   allow_writes  false refuses anything that changes state: set, call, console, hook, eval.
 --   bridge_dir    override the request/response folder (absolute path).
 -- The file lives in scripts\ because mod managers that deploy only <mod>\scripts would otherwise
 -- drop it. scripts\settings.lua wins; a root copy (the 1.0.0 layout) is a fallback only.
@@ -666,6 +667,344 @@ function UEB.types(pattern, limit)
     return { count = total, types = out }
 end
 
+-- Subclasses -------------------------------------------------------------------------------
+-- Every loaded class derived from a base class. There is no reverse index in the engine, so this
+-- walks GUObjectArray once and tests IsChildOf; measured at about 1.5 s on a large game.
+function UEB.subclasses(ref, limit, pattern)
+    limit = tonumber(limit) or 200
+    local base = UEB.resolve(ref)
+    local baseKind = safe(function() return base:GetClass():GetFName():ToString() end)
+    if baseKind ~= "Class" and baseKind ~= "BlueprintGeneratedClass" then
+        error("not a class: " .. tostring(safe(function() return base:GetFullName() end))
+              .. " is a " .. tostring(baseKind)
+              .. "; pass a class path such as /Script/Engine.PlayerController")
+    end
+    if pattern ~= nil then
+        -- Validate here so a bad pattern is reported against the argument, not a class name.
+        local okPat = pcall(string.match, "probe", pattern)
+        if not okPat then error("invalid Lua pattern: " .. tostring(pattern)) end
+    end
+    local baseAddr = safe(function() return base:GetAddress() end)
+    local basePath = safe(function() return base:GetFullName() end)
+    local rows = {}
+    trace("subclasses " .. tostring(basePath))
+    ForEachUObject(function(obj)
+        if not obj:IsValid() then return end
+        local cls = obj:GetClass()
+        if not cls or not cls:IsValid() then return end
+        local cn = cls:GetFName():ToString()
+        if cn ~= "Class" and cn ~= "BlueprintGeneratedClass" then return end
+        -- Exclude the base itself; addresses are the only identity a class object has here.
+        if safe(function() return obj:GetAddress() end) == baseAddr then return end
+        if not safe(function() return obj:IsChildOf(base) end) then return end
+        local n = obj:GetFName():ToString()
+        if pattern and not n:find(pattern) then return end
+        rows[#rows + 1] = {
+            name = n, kind = cn, path = obj:GetFullName(),
+            parent = safe(function() return obj:GetSuperStruct():GetFName():ToString() end),
+        }
+    end)
+    -- GUObjectArray order is allocation order, which changes between runs; sort for stable output.
+    table.sort(rows, function(a, b) return a.path < b.path end)
+    local total = #rows
+    for i = total, limit + 1, -1 do rows[i] = nil end
+    return { base = basePath, count = total, types = rows }
+end
+
+-- What the player is looking at ---------------------------------------------------------------
+-- A line trace from the camera (or from an actor's own location and forward vector). Read-only:
+-- it calls only const engine getters and the trace itself.
+
+local function traceObject(v)
+    if v == nil then return nil end
+    local kind = safe(function() return v:type() end)
+    if kind == "RemoteUnrealParam" or kind == "LocalUnrealParam" then v = safe(function() return v:get() end) end
+    if kind == "FWeakObjectPtr" then v = safe(function() return v:Get() end) end
+    if v ~= nil and safe(function() return v:IsValid() end) then return v end
+    return nil
+end
+
+local function objName(o) if o then return safe(function() return o:GetFullName() end) end end
+local function objClass(o) if o then return safe(function() return o:GetClass():GetFName():ToString() end) end end
+
+local MAX_TRACE_MATERIALS = 32
+
+function UEB.target(distance, channel, ref)
+    distance = tonumber(distance) or 5000
+    channel = tonumber(channel) or 0
+    local startV, fwd
+    -- Each engine call gets its own trace line: a native crash cannot be caught by pcall, so the
+    -- last line written names the stage that killed the process.
+    if ref ~= nil and ref ~= "" then
+        trace("target: resolve " .. tostring(ref))
+        local actor = UEB.resolve(ref)
+        trace("target: K2_GetActorLocation")
+        local loc = actor:K2_GetActorLocation()
+        trace("target: GetActorForwardVector")
+        fwd = actor:GetActorForwardVector()
+        startV = { X = loc.X, Y = loc.Y, Z = loc.Z }
+    else
+        trace("target: PlayerController")
+        local pc = FindFirstOf("PlayerController")
+        if not pc or not pc:IsValid() then error("no live PlayerController to trace from") end
+        local cam = pc.PlayerCameraManager
+        if not cam or not cam:IsValid() then error("the player controller has no PlayerCameraManager") end
+        trace("target: GetCameraLocation")
+        local loc = cam:GetCameraLocation()
+        trace("target: GetCameraRotation")
+        local rot = cam:GetCameraRotation()
+        trace("target: GetForwardVector")
+        fwd = UEHelpers.GetKismetMathLibrary():GetForwardVector(rot)
+        startV = { X = loc.X, Y = loc.Y, Z = loc.Z }
+    end
+    local endV = { X = startV.X + fwd.X * distance,
+                   Y = startV.Y + fwd.Y * distance,
+                   Z = startV.Z + fwd.Z * distance }
+    trace("target: GetWorld")
+    local world = UEHelpers.GetWorld()
+    if not world or not world:IsValid() then error("no world to trace in") end
+    local ksl = UEHelpers.GetKismetSystemLibrary()
+    if not ksl or not ksl:IsValid() then error("KismetSystemLibrary not available") end
+    -- LineTraceSingle fills `hit` as an out parameter; it comes back as a plain Lua table.
+    local hit = {}
+    trace("target: LineTraceSingle")
+    local okTrace, err = pcall(function()
+        return ksl:LineTraceSingle(world, startV, endV, channel, false, {}, 0, hit, true, {}, {}, 1.0)
+    end)
+    if not okTrace then error("LineTraceSingle failed: " .. tostring(err)) end
+    trace("target: encode")
+
+    local out = { hit = hit.bBlockingHit and true or false }
+    if not out.hit then return out end
+    local comp = traceObject(hit.Component)
+    local actor = comp and traceObject(safe(function() return comp:GetOwner() end)) or nil
+    out.actor = objName(actor)
+    out.actor_class = objClass(actor)
+    out.component = objName(comp)
+    out.component_class = objClass(comp)
+    out.distance = hit.Distance
+    out.impact_point = encodeValue(hit.ImpactPoint, 1)
+    out.impact_normal = encodeValue(hit.ImpactNormal, 1)
+    out.bone = encodeValue(hit.BoneName, 1)
+    out.phys_material = objName(traceObject(hit.PhysMaterial))
+    if comp and safe(function() return comp.GetMaterials end) ~= nil then
+        trace("target: GetMaterials")
+        local okM, arr = pcall(function() return comp:GetMaterials() end)
+        if okM and arr ~= nil then
+            local enc = safe(function() return encodeValue(arr, 1) end)
+            if type(enc) == "table" then
+                local mats = {}
+                for i = 1, math.min(#enc, MAX_TRACE_MATERIALS) do
+                    local e = enc[i]
+                    mats[i] = (type(e) == "table" and e.__object) or e
+                end
+                out.materials = mats
+            end
+        end
+    end
+    return out
+end
+
+-- Event streams ------------------------------------------------------------------------------
+-- A watch samples properties on a timer; a hook fires on a UFunction call. Both append to one
+-- shared ring buffer that the server drains with the `events` op. Stored on _G so UEB.reload()
+-- (a dofile of this file) keeps running streams and their backlog, as UEB_SNAPSHOTS does.
+UEB_STREAMS = UEB_STREAMS or {}
+UEB_EVENTS = UEB_EVENTS or { rows = {}, seq = 0, first = 1, dropped = 0 }
+
+local MAX_EVENTS = 2000
+local MIN_WATCH_MS = 16          -- about one frame at 60 fps; below that the sampler outruns the game
+
+-- Rows are keyed by seq rather than pushed onto a list, so eviction is O(1) and a client can ask
+-- for everything after a seq it already has.
+local function pushEvent(row)
+    local buf = UEB_EVENTS
+    buf.seq = buf.seq + 1
+    row.seq = buf.seq
+    row.t = os.clock()
+    buf.rows[buf.seq] = row
+    local evict = buf.seq - MAX_EVENTS
+    if evict >= buf.first then
+        for s = buf.first, evict do buf.rows[s] = nil end
+        buf.dropped = buf.dropped + (evict - buf.first + 1)
+        buf.first = evict + 1
+    end
+    local rec = UEB_STREAMS[row.label]
+    if rec then rec.events = (rec.events or 0) + 1 end
+    return row
+end
+
+local function newStream(label, kind, rec)
+    if type(label) ~= "string" or label == "" then error("a stream label (a non-empty string) is required") end
+    if UEB_STREAMS[label] then
+        error("a stream labelled '" .. label .. "' is already running; stop it first with unwatch")
+    end
+    rec.label, rec.kind = label, kind
+    rec.events, rec.started, rec.active = 0, os.time(), true
+    UEB_STREAMS[label] = rec
+    return rec
+end
+
+-- Sample one or more properties on a timer and append an event when a value changes.
+-- names may be a single name or a list. every = true appends every sample instead.
+function UEB.watch(ref, names, label, interval_ms, every)
+    if type(names) == "string" then names = { names } end
+    if type(names) ~= "table" or #names == 0 then error("watch needs a property name, or a list of names") end
+    local interval = math.max(MIN_WATCH_MS, tonumber(interval_ms) or 100)
+    -- Resolve once here so a bad reference fails the call rather than the loop.
+    local probe = UEB.resolve(ref)
+    local rec = newStream(label, "watch", {
+        ref = ref, names = names, interval_ms = interval, every = every and true or false,
+        last = {}, seen = {}, busy = false, path = safe(function() return probe:GetFullName() end),
+    })
+    LoopAsync(interval, function()
+        if not rec.active or UEB_STREAMS[label] ~= rec then return true end
+        -- One sample in flight at a time: a slow game thread must not queue overlapping closures.
+        if rec.busy then return false end
+        rec.busy = true
+        ExecuteInGameThread(function()
+            local ok, err = pcall(function()
+                -- Re-resolve every pass. A cached object faults on the first frame after a save
+                -- reload, and the reference is cheap to look up again.
+                local obj = UEB.resolve(rec.ref)
+                for _, name in ipairs(rec.names) do
+                    local okv, v = pcall(function() return obj[name] end)
+                    local enc
+                    if okv then enc = encodeValue(v, 1) else enc = "<error: " .. tostring(v) .. ">" end
+                    local prev, had = rec.last[name], rec.seen[name]
+                    local changed = false
+                    if had then
+                        local d = { changed = {}, added = {}, removed = {} }
+                        diffValue(name, prev, enc, d)
+                        changed = (#d.changed + #d.added + #d.removed) > 0
+                    end
+                    if rec.every or (had and changed) then
+                        pushEvent({ label = label, kind = "watch", path = name,
+                                    before = had and prev or nil, after = enc })
+                    end
+                    rec.last[name], rec.seen[name] = enc, true
+                end
+            end)
+            if not ok then
+                -- Usually a map transition took the object away. Report it once and stop rather
+                -- than spinning on a reference that will never resolve again.
+                pushEvent({ label = label, kind = "stream", event = "lost", error = tostring(err) })
+                rec.active = false
+            end
+            rec.busy = false
+        end)
+        return false
+    end)
+    return { label = label, kind = "watch", path = rec.path, names = names,
+             interval_ms = interval, every = rec.every }
+end
+
+-- Record every call of a UFunction. The callback copies parameters and nothing else: calling any
+-- UFunction from inside a hook, or touching the hooked object beyond its name, crashes the game.
+function UEB.hook(path, label, max_args)
+    requireWrites("hook")
+    if type(path) ~= "string" or path == "" then
+        error("hook needs a function path such as /Script/Engine.PlayerController:ClientRestart")
+    end
+    local maxArgs = tonumber(max_args) or 8
+    local short = path:match("[%.:]([%w_]+)$") or path
+    local rec = newStream(label, "hook", { fn = path, max_args = maxArgs })
+    local callback = function(ctx, ...)
+        local params = table.pack(...)
+        -- Nothing in here may error: an error inside a hook callback unwinds through native code.
+        pcall(function()
+            local args = {}
+            for i = 1, math.min(params.n, maxArgs) do
+                local okA, v = pcall(function() return encodeValue(params[i]:get(), 1) end)
+                args[i] = okA and v or "<unreadable>"
+            end
+            local okS, selfName = pcall(function() return ctx:get():GetFullName() end)
+            pushEvent({ label = label, kind = "hook", fn = short,
+                        self = okS and selfName or nil, args = args })
+        end)
+    end
+    local okReg, pre, post = pcall(RegisterHook, path, callback)
+    if not okReg then
+        UEB_STREAMS[label] = nil
+        error("RegisterHook failed for " .. path .. ": " .. tostring(pre))
+    end
+    rec.pre, rec.post = pre, post
+    return { label = label, kind = "hook", fn = path, pre = pre, post = post, max_args = maxArgs }
+end
+
+-- Drain the buffer. since is a seq, exclusive; next is the highest seq scanned, to pass back.
+function UEB.events(since, label, limit, clear)
+    local buf = UEB_EVENTS
+    since = tonumber(since) or 0
+    limit = tonumber(limit) or 500
+    local from = math.max(since + 1, buf.first)
+    local out, last = {}, since
+    for s = from, buf.seq do
+        local row = buf.rows[s]
+        if row and (label == nil or row.label == label) then
+            if #out >= limit then break end
+            out[#out + 1] = row
+        end
+        last = s
+    end
+    if clear then
+        if label ~= nil then
+            -- Only the returned rows; other labels keep their backlog.
+            for _, row in ipairs(out) do buf.rows[row.seq] = nil end
+            while buf.first <= buf.seq and buf.rows[buf.first] == nil do buf.first = buf.first + 1 end
+        elseif last >= buf.first then
+            for s = buf.first, last do buf.rows[s] = nil end
+            buf.first = last + 1
+        end
+    end
+    local buffered = 0
+    for s = buf.first, buf.seq do if buf.rows[s] then buffered = buffered + 1 end end
+    return { events = out, next = last, dropped = buf.dropped, buffered = buffered }
+end
+
+function UEB.streams()
+    local out = {}
+    for label, rec in pairs(UEB_STREAMS) do
+        local target
+        if rec.kind == "hook" then
+            target = rec.fn
+        else
+            target = tostring(rec.ref) .. " " .. table.concat(rec.names or {}, ",")
+        end
+        out[#out + 1] = { label = label, kind = rec.kind, target = target,
+                          interval_ms = rec.interval_ms, events = rec.events or 0,
+                          started = rec.started, active = rec.active and true or false }
+    end
+    table.sort(out, function(a, b) return a.label < b.label end)
+    return out
+end
+
+function UEB.unwatch(label)
+    if type(label) ~= "string" or label == "" then error("unwatch needs a label, or \"*\" for all") end
+    local function stop(l, rec)
+        rec.active = false
+        UEB_STREAMS[l] = nil
+        if rec.kind == "hook" and rec.pre ~= nil then
+            pcall(UnregisterHook, rec.fn, rec.pre, rec.post)
+        end
+    end
+    if label == "*" then
+        local n = 0
+        for l, rec in pairs(UEB_STREAMS) do stop(l, rec); n = n + 1 end
+        return { stopped = n }
+    end
+    local rec = UEB_STREAMS[label]
+    if not rec then
+        local known = {}
+        for k in pairs(UEB_STREAMS) do known[#known + 1] = k end
+        table.sort(known)
+        error("no stream labelled '" .. label .. "'; running: "
+              .. (#known > 0 and table.concat(known, ", ") or "<none>"))
+    end
+    stop(label, rec)
+    return { stopped = 1, label = label }
+end
+
 function UEB.console(cmd)
     requireWrites("console")
     local pc = UEHelpers.GetPlayerController()
@@ -729,7 +1068,9 @@ end
 -- scalars in plain tables (funcs, objects, types). Re-encoding would re-apply MAX_DEPTH and turn
 -- a list longer than MAX_ITEMS into an object keyed "1".."200".
 local PREENCODED_OPS = { props = true, funcs = true, objects = true, types = true,
-                         snapshot = true, diff = true, snapshots = true, forget = true }
+                         snapshot = true, diff = true, snapshots = true, forget = true,
+                         subclasses = true, target = true, watch = true, hook = true,
+                         events = true, streams = true, unwatch = true }
 
 -- Several ops in one round trip, each pcall-fenced. Also the structured surface that stays
 -- available when allow_eval is off.
@@ -758,6 +1099,13 @@ local BATCH_OPS = {
     forget    = function(a) return UEB.forget(a.label) end,
     objects = function(a) return UEB.objects(a.class_name, a.limit) end,
     types   = function(a) return UEB.types(a.pattern, a.limit) end,
+    subclasses = function(a) return UEB.subclasses(a.ref, a.limit, a.pattern) end,
+    target     = function(a) return UEB.target(a.distance, a.channel, a.ref) end,
+    watch      = function(a) return UEB.watch(a.ref, a.names or a.name, a.label, a.interval_ms, a.every) end,
+    hook       = function(a) return UEB.hook(a["function"], a.label, a.max_args) end,
+    events     = function(a) return UEB.events(a.since, a.label, a.limit, a.clear) end,
+    streams    = function(a) return UEB.streams() end,
+    unwatch    = function(a) return UEB.unwatch(a.label) end,
     console = function(a) return UEB.console(a.command) end,
     dump    = function(a) return UEB.dump(a.kind) end,
     find    = function(a)
@@ -793,6 +1141,8 @@ end
 local function runEval(code)
     local output = {}
     local env = setmetatable({
+        -- UEHelpers is a file local here, so an eval chunk cannot reach it through _G.
+        UEHelpers = UEHelpers,
         print = function(...)
             local parts = {}
             for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end

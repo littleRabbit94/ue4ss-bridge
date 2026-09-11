@@ -1,6 +1,6 @@
 """Build the UEBridge mod archive for Nexus / GitHub releases.
 
-Output: dist/UEBridge-<version>.zip with the folder path inside, so extracting it into the game
+Output: dist/ue4ss-bridge-<version>.zip with the folder path inside, so extracting it into the game
 root (or the folder holding ue4ss\\) lands the mod in ue4ss\\Mods\\UEBridge with no further step:
 
     ue4ss/Mods/UEBridge/enabled.txt          <- starts the mod without editing mods.txt
@@ -28,7 +28,7 @@ DIST = ROOT / "dist"
 README = """UEBridge {version}
 
 A developer tool for UE4SS games. It changes nothing on its own. It lets a program on this
-computer (for example the ue-bridge MCP server, so an AI agent can help you mod) run Lua inside
+computer (for example the ue4ss-bridge MCP server, so an AI agent can help you mod) run Lua inside
 the running game and read the result, without a relaunch per question.
 
 INSTALL
@@ -52,8 +52,8 @@ SETTINGS (scripts\\settings.lua in the mod folder)
   allow_eval    = false  refuses raw Lua; the structured inspection tools still work
 
 THE OTHER HALF
-  The MCP server and CLI (ue-bridge) is a separate, optional download:
-    pip install ue-bridge        or        uvx ue-bridge
+  The MCP server and CLI (ue4ss-bridge) is a separate, optional download:
+    pip install ue4ss-bridge     or        uvx ue4ss-bridge
   Source, documentation and the agent setup snippets: {source}
 
 UNINSTALL
@@ -80,7 +80,9 @@ def source_url() -> str:
 def main() -> int:
     ver = version()
     DIST.mkdir(exist_ok=True)
-    out = DIST / f"UEBridge-{ver}.zip"
+    # The archive is named for the project; the folder inside stays UEBridge, which is what UE4SS
+    # loads and what users already have on disk.
+    out = DIST / f"ue4ss-bridge-{ver}.zip"
     prefix = "ue4ss/Mods/UEBridge/"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(prefix + "enabled.txt", "")
