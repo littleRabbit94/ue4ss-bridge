@@ -1,7 +1,7 @@
 # ue4ss-bridge
 
 [![PyPI version](https://img.shields.io/pypi/v/ue4ss-bridge.svg)](https://pypi.org/project/ue4ss-bridge/)
-[![PyPI Downloads](https://static.pepy.tech/badge/ue4ss-bridge/month)](https://pepy.tech/project/ue4ss-bridge)
+[![PyPI Downloads](https://static.pepy.tech/badge/ue4ss-bridge/month)](https://pepy.tech/projects/ue4ss-bridge)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
