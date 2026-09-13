@@ -935,8 +935,10 @@ function UEB.watch(ref, names, label, interval_ms, every)
                 changed = (#d.changed + #d.added + #d.removed) > 0
             end
             if rec.every or (had and changed) then
-                pushEvent({ label = label, kind = "watch", path = name,
-                            before = had and prev or nil, after = enc })
+                -- Assigned explicitly: `had and prev or nil` drops a boolean false before-value.
+                local row = { label = label, kind = "watch", path = name, after = enc }
+                if had then row.before = prev end
+                pushEvent(row)
             end
             rec.last[name], rec.seen[name] = enc, true
             if not okv then
