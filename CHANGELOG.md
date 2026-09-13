@@ -25,13 +25,23 @@ bridge, and the new one says what the tool needs.
 - New `watch` batch op and `watch_property` MCP tool (CLI: `watch <ref> <prop> <label>
   [--interval ms]`) sample one property or a list of them on a timer and record an event whenever
   a value changes. `every = true` records every sample instead.
-- The sampler re-resolves the reference on every pass rather than caching the object, so a watch
-  on `first:PlayerController` follows a respawn, and a cached object that faults on the first
-  frame after a save reload cannot take the game down.
-- When the reference stops resolving, the watch records one `{kind: "stream", event: "lost"}` row
-  and stops itself instead of spinning, which is what a map transition looks like.
-- `interval_ms` is clamped to at least 16, about one frame; one sample is in flight at a time, so
+- The game-thread runner is built once, when the watch is created: the timer body only checks
+  flags and queues that one function, so nothing is allocated on the mod's async thread while the
+  game thread runs Lua in the same state (allocating there corrupted a Lua table and crashed a
+  game in `lua_next`).
+- The sampler holds the resolved object between passes and rechecks it with `IsValid()` on each
+  one, looking it up again only when the object is gone or a read failed. A watch on
+  `first:PlayerController` still follows a respawn, without paying an object lookup per pass or
+  trusting a stale pointer across a save reload.
+- `interval_ms` defaults to 250 and is clamped to at least 100: a lookup costs roughly 10 to 25 ms
+  of game-thread time on a game without object hash tables. One sample is in flight at a time, so
   a slow game thread does not queue overlapping closures.
+- A watch survives a map change. When the reference stops resolving it records one
+  `{kind: "stream", event: "lost"}` row and retries at a slow cadence instead of every interval.
+  `{kind: "stream", event: "resumed"}` is recorded when the watch adopts a different object (by
+  address) after the previous one stopped being valid or was lost, with the baseline reset so the
+  first sample on the new object is not reported as a change; the same object coming back after a
+  blip records nothing. Only `stop_stream` ends a watch, and `list_streams` reports `lost`.
 - New `hook` batch op and `hook_function` MCP tool (CLI: `hook <fnpath> <label>`) record every
   call of a UFunction with up to `max_args` parameters (default 8) and the calling object's name.
   The callback copies values and does nothing else. A hook registers cleanly, but an eval that

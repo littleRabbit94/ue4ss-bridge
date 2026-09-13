@@ -813,7 +813,8 @@ UEB_STREAMS = UEB_STREAMS or {}
 UEB_EVENTS = UEB_EVENTS or { rows = {}, seq = 0, first = 1, dropped = 0 }
 
 local MAX_EVENTS = 2000
-local MIN_WATCH_MS = 16          -- about one frame at 60 fps; below that the sampler outruns the game
+local MIN_WATCH_MS = 100         -- a pass that has to look its object up costs an object scan
+                                 -- (10-25 ms) on the game thread, which also runs the Lua state
 
 -- Rows are keyed by seq rather than pushed onto a list, so eviction is O(1) and a client can ask
 -- for everything after a seq it already has.
@@ -847,52 +848,120 @@ end
 
 -- Sample one or more properties on a timer and append an event when a value changes.
 -- names may be a single name or a list. every = true appends every sample instead.
+-- The game-thread runner is built once, at creation: the LoopAsync body allocates nothing, because
+-- allocating on the mod's async thread while the game thread runs Lua in the same state corrupts
+-- that state (a 50 ms watch crashed a game in lua_next).
+-- The resolved object is held between passes and rechecked with IsValid() on each one. A lookup
+-- happens only when the object is gone (IsValid() false, or a read faulted and dropped it) or
+-- while the watch is lost, since a lookup costs a full object scan on the game thread and a
+-- healthy watch has no use for the result.
+-- A reference that stops resolving records one "lost" row and keeps retrying at a slow cadence.
+-- A "resumed" row (with the new path) is recorded when the watch adopts a different object, judged
+-- by address and full name, after the previous one stopped being valid or was lost; the baseline is
+-- reset so the first sample on the new object is not reported as a change. The same object coming
+-- back after a blip records nothing (a UObject without GetAddress always counts as different).
+-- Only unwatch stops a watch.
 function UEB.watch(ref, names, label, interval_ms, every)
     if type(names) == "string" then names = { names } end
     if type(names) ~= "table" or #names == 0 then error("watch needs a property name, or a list of names") end
-    local interval = math.max(MIN_WATCH_MS, tonumber(interval_ms) or 100)
+    local interval = math.max(MIN_WATCH_MS, tonumber(interval_ms) or 250)
     -- Resolve once here so a bad reference fails the call rather than the loop.
     local probe = UEB.resolve(ref)
     local rec = newStream(label, "watch", {
         ref = ref, names = names, interval_ms = interval, every = every and true or false,
-        last = {}, seen = {}, busy = false, path = safe(function() return probe:GetFullName() end),
+        last = {}, seen = {}, busy = false, lost = false, skip = 0,
+        obj = probe,
+        addr = safe(function() return probe:GetAddress() end),
+        path = safe(function() return probe:GetFullName() end),
     })
+    -- While lost, retry about once a second instead of every interval. Computed once: the timer
+    -- body only decrements it, so it never allocates.
+    local lostSkip = math.max(1, math.ceil(1000 / interval)) - 1
+
+    -- Game thread. Allocation here is fine; on the timer thread it is not.
+    local function doSample()
+        local obj = rec.obj
+        if obj ~= nil then
+            local okV, isValid = pcall(function() return obj:IsValid() end)
+            if not (okV and isValid == true) then obj, rec.obj = nil, nil end
+        end
+        -- Look up only when there is nothing valid to read. A healthy watch would never act on a
+        -- fresh lookup, and a lookup is a 10 to 25 ms object scan on the game thread. A respawn
+        -- shows up as IsValid() going false; a stale object that faults raises into the per-name
+        -- pcall below, which drops the cache and so resolves on the next pass.
+        if obj == nil then
+            local okR, fresh = pcall(UEB.resolve, rec.ref)
+            if okR and fresh ~= nil then
+                local freshAddr = safe(function() return fresh:GetAddress() end)
+                local freshPath = safe(function() return fresh:GetFullName() end)
+                if not rec.lost and freshAddr ~= nil and freshAddr == rec.addr
+                        and freshPath ~= nil and freshPath == rec.path then
+                    -- The same object back after a transient blip or a read fault: keep watching
+                    -- it, keep the baseline, say nothing. Address alone is not identity, since UE
+                    -- reuses object slots and a respawn can land in the freed one; the name settles it.
+                    obj, rec.obj = fresh, fresh
+                else
+                    -- A different object, because the previous one stopped being valid (a respawn)
+                    -- or was lost. Start clean so the first sample on the new object is not
+                    -- reported as a change of the old one.
+                    obj, rec.obj = fresh, fresh
+                    rec.last, rec.seen = {}, {}
+                    rec.lost, rec.skip = false, 0
+                    rec.addr = freshAddr
+                    rec.path = freshPath
+                    pushEvent({ label = label, kind = "stream", event = "resumed", path = rec.path })
+                end
+            else
+                -- Usually a map transition took the object away. Report it once, then keep the
+                -- stream alive and retry slowly until the reference resolves again.
+                if not rec.lost then
+                    rec.lost = true
+                    pushEvent({ label = label, kind = "stream", event = "lost",
+                                error = okR and "the reference no longer resolves"
+                                             or tostring(fresh) })
+                end
+                rec.skip = lostSkip
+                return
+            end
+        end
+        for _, name in ipairs(rec.names) do
+            local okv, enc = pcall(function() return encodeValue(obj[name], 1) end)
+            if not okv then enc = "<error: " .. tostring(enc) .. ">" end
+            local prev, had = rec.last[name], rec.seen[name]
+            local changed = false
+            if had then
+                local d = { changed = {}, added = {}, removed = {} }
+                diffValue(name, prev, enc, d)
+                changed = (#d.changed + #d.added + #d.removed) > 0
+            end
+            if rec.every or (had and changed) then
+                pushEvent({ label = label, kind = "watch", path = name,
+                            before = had and prev or nil, after = enc })
+            end
+            rec.last[name], rec.seen[name] = enc, true
+            if not okv then
+                -- The cached object misbehaved: drop it and stop reading the rest of the names off
+                -- it. The next pass resolves before it reads.
+                rec.obj = nil
+                break
+            end
+        end
+    end
+
+    local function sample()
+        local ok, err = pcall(doSample)
+        -- Clear busy first: a throw in the concat or in trace must not wedge the timer.
+        rec.busy = false
+        if not ok then pcall(trace, "watch " .. label .. ": " .. tostring(err)) end
+    end
+
     LoopAsync(interval, function()
         if not rec.active or UEB_STREAMS[label] ~= rec then return true end
         -- One sample in flight at a time: a slow game thread must not queue overlapping closures.
         if rec.busy then return false end
+        if rec.skip > 0 then rec.skip = rec.skip - 1 return false end
         rec.busy = true
-        ExecuteInGameThread(function()
-            local ok, err = pcall(function()
-                -- Re-resolve every pass. A cached object faults on the first frame after a save
-                -- reload, and the reference is cheap to look up again.
-                local obj = UEB.resolve(rec.ref)
-                for _, name in ipairs(rec.names) do
-                    local okv, v = pcall(function() return obj[name] end)
-                    local enc
-                    if okv then enc = encodeValue(v, 1) else enc = "<error: " .. tostring(v) .. ">" end
-                    local prev, had = rec.last[name], rec.seen[name]
-                    local changed = false
-                    if had then
-                        local d = { changed = {}, added = {}, removed = {} }
-                        diffValue(name, prev, enc, d)
-                        changed = (#d.changed + #d.added + #d.removed) > 0
-                    end
-                    if rec.every or (had and changed) then
-                        pushEvent({ label = label, kind = "watch", path = name,
-                                    before = had and prev or nil, after = enc })
-                    end
-                    rec.last[name], rec.seen[name] = enc, true
-                end
-            end)
-            if not ok then
-                -- Usually a map transition took the object away. Report it once and stop rather
-                -- than spinning on a reference that will never resolve again.
-                pushEvent({ label = label, kind = "stream", event = "lost", error = tostring(err) })
-                rec.active = false
-            end
-            rec.busy = false
-        end)
+        ExecuteInGameThread(sample)
         return false
     end)
     return { label = label, kind = "watch", path = rec.path, names = names,
@@ -973,7 +1042,8 @@ function UEB.streams()
         end
         out[#out + 1] = { label = label, kind = rec.kind, target = target,
                           interval_ms = rec.interval_ms, events = rec.events or 0,
-                          started = rec.started, active = rec.active and true or false }
+                          started = rec.started, active = rec.active and true or false,
+                          lost = rec.lost and true or false }
     end
     table.sort(out, function(a, b) return a.label < b.label end)
     return out

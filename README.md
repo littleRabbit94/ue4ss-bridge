@@ -204,7 +204,7 @@ ue4ss-bridge subclasses /Script/Engine.Pawn
 ue4ss-bridge target 5000                    # what the camera is pointed at
 ue4ss-bridge snapshot first:PlayerController before --super   # --super: include inherited properties (props too)
 ue4ss-bridge diff before                    # or: diff <ref> <label> for another object
-ue4ss-bridge watch first:PlayerController Pawn pawnwatch --interval 100
+ue4ss-bridge watch first:PlayerController Pawn pawnwatch --interval 500
 ue4ss-bridge hook /Script/Engine.PlayerController:ClientRestart restarts
 ue4ss-bridge events                         # or: events <label>
 ue4ss-bridge streams
@@ -245,7 +245,7 @@ Once an agent is connected, ask it about the running game in plain language:
 | `forget_snapshot(label)` | Drop one snapshot, or all with `"*"`. Read-only. |
 | `list_subclasses(ref, limit, pattern)` | Every loaded class derived from a base class, Blueprint classes included: `{base, count, types}` with `{name, kind, path, parent}` rows sorted by path. Read-only; about 1.5 s. |
 | `targeted_actor(distance, channel, ref)` | Line trace from the camera (or from `ref`'s own location and forward vector): the actor, component, impact point and normal, bone, physical material and materials hit. Read-only. |
-| `watch_property(ref, names, label, interval_ms, every)` | Sample properties on a timer and record every change under a label. Read-only. |
+| `watch_property(ref, names, label, interval_ms, every)` | Sample properties on a timer and record every change under a label. `interval_ms` defaults to 250 with a 100 ms floor. Read-only. |
 | `hook_function(function, label, max_args)` | Record every call of a `UFunction` with its parameters. Counts as a write. |
 | `poll_events(since, label, limit, clear)` | Drain what the watches and hooks recorded: `{events, next, dropped, buffered}`. Read-only. |
 | `list_streams()` / `stop_stream(label)` | Watches and hooks running / stop one, or all with `"*"`. |
@@ -273,9 +273,15 @@ diffs empty.
 
 **Streams** (watches and hooks) also live in the game process and survive `UEB.reload()`. They
 share one buffer of 2000 events with a rising sequence number; `poll_events` reports `dropped`
-when the cap evicted rows before you read them. Labels are unique, and a watch re-resolves its
-reference on every pass, so it follows `first:PlayerController` across respawns and stops itself
-with a `lost` event when the reference goes away. A hook's callback copies parameters and nothing
+when the cap evicted rows before you read them. Labels are unique. A watch holds its object between
+passes and rechecks it with `IsValid()` each pass, looking it up again only when it is gone or a
+read failed, so it follows `first:PlayerController` across respawns; its interval defaults to
+250 ms and is floored at 100 ms, because a lookup costs 10 to 25 ms of game-thread time on a game
+without object hash tables. It records `resumed` when it adopts a different object (by address and full name)
+after the previous one stopped being valid or was lost, resetting the baseline so the first sample
+on the new object is not a change; the same object back after a blip records nothing. When the
+reference goes away it records one `lost` event and retries at a slow cadence.
+A hook's callback copies parameters and nothing
 else: calling a hooked function from `eval_lua` in the same session has crashed the game, so read
 hook output through `poll_events`.
 

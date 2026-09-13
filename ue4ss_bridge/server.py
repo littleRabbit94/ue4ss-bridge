@@ -478,16 +478,25 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 
     @mcp.tool()
     def watch_property(ref: str, names: list[str] | str, label: str,
-                       interval_ms: int = 100, every: bool = False) -> dict:
+                       interval_ms: int = 250, every: bool = False) -> dict:
         """Sample properties on a timer and record an event whenever a value changes. Read-only.
 
-        names is one property name or a list. interval_ms is clamped to at least 16 (about one
-        frame). every=True records every sample instead of only changes. Read the results with
-        poll_events; nothing is pushed.
+        names is one property name or a list. every=True records every sample instead of only
+        changes. Read the results with poll_events; nothing is pushed.
 
-        The watch re-resolves ref on every pass, so it follows a reference such as
-        'first:PlayerController' across respawns. If the reference stops resolving (usually a map
-        transition) it records one {kind: "stream", event: "lost"} row and stops itself.
+        interval_ms is clamped to at least 100 and defaults to 250. A pass that looks the object up
+        costs roughly 10 to 25 ms of game-thread time on a game without object hash tables, so keep
+        watches few and slow (250 ms or more).
+
+        The object is held between passes and rechecked with IsValid() on each one; a lookup
+        happens only when it is gone or a read failed, so the watch follows a reference such as
+        'first:PlayerController' across respawns without paying a scan per pass.
+        {kind: "stream", event: "resumed"} is recorded when the watch adopts a different object (by
+        address) after the previous one stopped being valid or was lost, with the baseline reset so
+        the first sample on the new object is not reported as a change; the same object coming back
+        after a blip records nothing. If the reference stops resolving (usually a map transition)
+        it records one {kind: "stream", event: "lost"} row and keeps retrying at a slow cadence.
+        Only stop_stream ends a watch.
 
         Labels are unique: reusing one raises. Stop a watch with stop_stream.
         """
@@ -529,7 +538,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 
     @mcp.tool()
     def list_streams() -> dict:
-        """Watches and hooks currently running: {label, kind, target, interval_ms, events, started, active}. Read-only."""
+        """Watches and hooks currently running: {label, kind, target, interval_ms, events, started, active, lost}. Read-only."""
         return one("streams")
 
     @mcp.tool()
@@ -686,7 +695,7 @@ def _cli(cmd: str, rest: list[str]) -> int:
     # --super includes inherited properties (props, snapshot); a BP_* child class declares few of its own.
     include_super = "--super" in rest
     rest = [r for r in rest if r != "--super"]
-    interval_ms = 100
+    interval_ms = 250
     if "--interval" in rest:
         i = rest.index("--interval")
         if len(rest) <= i + 1:
