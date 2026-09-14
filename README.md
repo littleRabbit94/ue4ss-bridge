@@ -104,7 +104,7 @@ The archive carries the folder path, so the files land in `ue4ss\Mods\UEBridge\`
 **2. Verify.** Launch the game and check `ue4ss\UE4SS.log` for:
 
 ```
-[UEBridge] v1.2.0 ready
+[UEBridge] v1.2.1 ready
 ```
 
 **3. Uninstall.** Delete `ue4ss\Mods\UEBridge\` and, if present, `ue4ss\bridge\`.

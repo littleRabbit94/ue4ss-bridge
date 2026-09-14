@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1 (2026-09-14)
+
+- `get` and `set` no longer fail with `attempt to index a nil value (local 'prop')` raised inside
+  UE4SS's `ForEachProperty` when UE4SS hands the property-name check a nil entry (seen once in
+  play 2026-09-13). Every property walk now skips nil entries and counts them. When the name is
+  not found and entries were skipped, the error says the class had unreadable properties instead
+  of "no property"; `props` returns the count as `skipped`, a struct value as `__skipped`. An
+  error inside a walk is raised after the walk returns, so it reaches the caller as an ordinary
+  batch error without the `[Lua::call_function]` wrapper or a UE4SS log line.
+
 ## 1.2.0 (2026-09-11)
 
 **Renamed to ue4ss-bridge.** The old name collided with grapeot/ue-bridge, an Unreal Editor TCP

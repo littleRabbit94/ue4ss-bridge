@@ -19,7 +19,7 @@
 -- "address": n}, FName / FString become strings, TArrays become lists, structs are walked
 -- through their reflected type.
 
-local VERSION = "1.2.0"
+local VERSION = "1.2.1"
 local PROTOCOL = 3
 local MOD_NAME = "UEBridge"
 
@@ -139,6 +139,22 @@ local function safe(fn, ...)
     return nil
 end
 
+-- ForEachProperty wrapper. UE4SS can hand the callback nil (seen 2026-09-13 in a get/set name
+-- check), and an error raised inside the callback escapes as a "[Lua::call_function]" error.
+-- Nil entries are skipped and counted; fn errors stop the walk and are re-raised out here.
+-- fn returning true stops the walk. Returns the number of nil entries skipped.
+local function eachProperty(st, fn)
+    local skipped, failed, failure = 0, false, nil
+    st:ForEachProperty(function(prop)
+        if prop == nil then skipped = skipped + 1; return end
+        local ok, stop = pcall(fn, prop)
+        if not ok then failed, failure = true, stop; return true end
+        if stop == true then return true end
+    end)
+    if failed then error(failure, 0) end
+    return skipped
+end
+
 local encodeValue
 
 local function encodeUObject(obj)
@@ -210,9 +226,9 @@ local function encodeStruct(s, depth)
         return out
     end
     -- Walk the super chain: FVector_NetQuantize100 declares nothing itself and inherits X/Y/Z.
-    local seen = {}
+    local seen, skipped = {}, 0
     while st and st:IsValid() do
-        st:ForEachProperty(function(prop)
+        skipped = skipped + eachProperty(st, function(prop)
             local rawn = prop:GetFName():ToString()
             if seen[rawn] then return end
             seen[rawn] = true
@@ -231,6 +247,7 @@ local function encodeStruct(s, depth)
         end)
         st = safe(function() return st:GetSuperStruct() end)
     end
+    if skipped > 0 then out.__skipped = skipped end
     return out
 end
 
@@ -326,11 +343,11 @@ function UEB.props(ref, includeSuper, readSoft, pattern)
         if not okPat then error("invalid Lua pattern: " .. tostring(pattern)) end
     end
     if includeSuper == nil then includeSuper = false end
-    local out, seen = {}, {}
+    local out, seen, skipped = {}, {}, 0
     local cls = obj:GetClass()
     while cls and cls:IsValid() do
         local cname = safe(function() return cls:GetFName():ToString() end)
-        cls:ForEachProperty(function(prop)
+        skipped = skipped + eachProperty(cls, function(prop)
             local name = prop:GetFName():ToString()
             if not seen[name] then
                 seen[name] = true
@@ -355,7 +372,9 @@ function UEB.props(ref, includeSuper, readSoft, pattern)
         if not includeSuper then break end
         cls = safe(function() return cls:GetSuperStruct() end)
     end
-    return { object = obj:GetFullName(), class = obj:GetClass():GetFullName(), properties = out }
+    local res = { object = obj:GetFullName(), class = obj:GetClass():GetFullName(), properties = out }
+    if skipped > 0 then res.skipped = skipped end
+    return res
 end
 
 -- Snapshots and diffs ---------------------------------------------------------------------
@@ -564,16 +583,18 @@ end
 
 -- UE4SS returns an "<invalid>" object for an undeclared property name and silently ignores writes
 -- to one, so get/set check the reflection first.
+-- Returns found, and how many nil entries UE4SS handed the walk.
 local function declaresProperty(cls, name)
+    local skipped = 0
     while cls and cls:IsValid() do
         local found = false
-        cls:ForEachProperty(function(prop)
-            if prop:GetFName():ToString() == name then found = true end
+        skipped = skipped + eachProperty(cls, function(prop)
+            if prop:GetFName():ToString() == name then found = true; return true end
         end)
-        if found then return true end
+        if found then return true, skipped end
         cls = safe(function() return cls:GetSuperStruct() end)
     end
-    return false
+    return false, skipped
 end
 
 local function declaresFunction(cls, name)
@@ -590,10 +611,16 @@ end
 
 local function requireProperty(obj, name)
     local cls = obj:GetClass()
-    if declaresProperty(cls, name) then return end
+    local found, skipped = declaresProperty(cls, name)
+    if found then return end
     local cname = tostring(safe(function() return cls:GetFName():ToString() end))
     if declaresFunction(cls, name) then
         error("'" .. name .. "' is a UFunction on " .. cname .. ", not a property; call it with call_function")
+    end
+    if skipped > 0 then
+        error("no readable property '" .. name .. "' on " .. cname .. ": UE4SS returned " .. skipped
+              .. " unreadable property entries for the class, which can mean the object is being torn"
+              .. " down; resolve it again and retry")
     end
     error("no property '" .. name .. "' on " .. cname .. "; inspect_object lists the ones it has")
 end
