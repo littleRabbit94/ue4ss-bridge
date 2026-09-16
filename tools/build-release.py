@@ -9,8 +9,8 @@ root (or the folder holding ue4ss\\) lands the mod in ue4ss\\Mods\\UEBridge with
     ue4ss/Mods/UEBridge/scripts/settings.lua
     ue4ss/Mods/UEBridge/README.txt
 
-mod.toml is left out: it is a mod-manager manifest for the author's own tooling, not a UE4SS
-file. The archive carries nothing executable beyond the Lua the mod is.
+mod.toml is left out: it is a mod-manager manifest, not a UE4SS file. The archive carries nothing
+executable beyond the mod's Lua.
 
 Usage: python tools/build-release.py   (from the repo root; no dependencies)
 """

@@ -22,17 +22,14 @@ Two parts, released separately:
 
 ## What it does
 
-Instead of relaunching the game every time you test an offset, check an object reference or tweak
-a variable, UEBridge runs your queries live on the engine's game thread:
+UEBridge runs queries on the game thread of the running game, with no relaunch per question:
 
-- **AI coding agents (MCP).** Connect Claude Code, Claude Desktop, Cursor, Codex or any Model
-  Context Protocol client directly to the running game.
+- **AI coding agents (MCP).** Connect Claude Code, Claude Desktop, Cursor, Codex or any Model Context Protocol client to the running game.
 - **Live object inspection.** Find live instances of a `UClass`, read every reflected property and
   its current value, list the `UFunction`s on the class chain.
 - **Runtime manipulation.** Set properties, call `UFunction`s with arguments, evaluate raw Lua.
 - **Snapshot and diff.** Keep a property walk under a label, play, then ask what changed.
-- **Event streams.** Watch properties on a timer or hook a `UFunction`, play, then poll the events
-  that piled up while you did.
+- **Event streams.** Watch properties on a timer or hook a `UFunction`, then poll the recorded events.
 - **Class hierarchy and aim.** List every loaded subclass of a base class; line-trace from the
   camera to find out what the player is looking at.
 - **Engine commands and dumps.** Run console commands or trigger the UE4SS dumpers (`usmap`,
@@ -46,7 +43,7 @@ AI agent / script  ->  ue4ss-bridge (MCP stdio or HTTP, or CLI)  ->  request.jso
                        ue4ss-bridge  <-  response.json            <-
 ```
 
-A minimal file-based IPC protocol:
+File-based IPC:
 
 1. Every 50 ms the in-game Lua loop checks for `request.json` in `ue4ss\bridge\`.
 2. When one appears, the request runs on the game thread via `ExecuteInGameThread`.
@@ -69,8 +66,7 @@ function you name, and only while you ask for it. Verified on:
 
 ## Renamed from ue-bridge
 
-**Why.** The old name collided with [grapeot/ue-bridge](https://github.com/grapeot/ue-bridge), an
-Unreal *Editor* TCP bridge, and the new name says what the tool needs: UE4SS.
+**Why.** The old name collided with [grapeot/ue-bridge](https://github.com/grapeot/ue-bridge), an Unreal *Editor* TCP bridge.
 
 **What changed.** The PyPI package is `ue4ss-bridge`, the Python module is `ue4ss_bridge`, and the
 command is `ue4ss-bridge`. Environment variables are `UE4SS_BRIDGE_GAME_DIR` and
@@ -126,7 +122,7 @@ tool), or restart the game.
 
 ## Connect a tool or an AI agent (the MCP server)
 
-The program that writes and reads the IPC files is **ue4ss-bridge**, a small Python package. It
+The program that writes and reads the IPC files is **ue4ss-bridge**, a Python package. It
 finds any running UE4SS game on its own (an exe in a `Binaries\Win64` folder with `ue4ss\` beside
 it), so there are no paths to configure. Pass `--game-dir` or set `UE4SS_BRIDGE_GAME_DIR` to pin
 one. The pre-1.2.0 `UE_BRIDGE_GAME_DIR` and `UE_BRIDGE_DATA_DIR` are still read as a fallback.
@@ -240,7 +236,7 @@ Once an agent is connected, ask it about the running game in plain language:
 | `call_function(ref, fn, args)` | Call a UFunction with positional args. |
 | `console_command(cmd)` | Run a console command. |
 | `snapshot_object(ref, label, include_super, pattern)` | Keep an `inspect_object` walk in the game under a label. Read-only. |
-| `diff_object(label, ref, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. `ref` defaults to the snapshot's own reference. At most 500 rows per list, with a `truncated` count when that bites. Read-only. |
+| `diff_object(label, ref, update)` | Re-walk and report `{changed, added, removed, same}` against that snapshot, by dotted property path. `ref` defaults to the snapshot's own reference. At most 500 rows per list; `truncated` counts the rows dropped per list. Read-only. |
 | `list_snapshots()` | Labels held, with object path, wall-clock `taken` timestamp (whole seconds since the epoch) and property count. Read-only. |
 | `forget_snapshot(label)` | Drop one snapshot, or all with `"*"`. Read-only. |
 | `list_subclasses(ref, limit, pattern)` | Every loaded class derived from a base class, Blueprint classes included: `{base, count, types}` with `{name, kind, path, parent}` rows sorted by path. Read-only; about 1.5 s. |
@@ -280,7 +276,7 @@ read failed, so it follows `first:PlayerController` across respawns; its interva
 without object hash tables. It records `resumed` when it adopts a different object (by address and full name)
 after the previous one stopped being valid or was lost, resetting the baseline so the first sample
 on the new object is not a change; the same object back after a blip records nothing. When the
-reference goes away it records one `lost` event and retries at a slow cadence.
+reference goes away it records one `lost` event and retries about once a second.
 A hook's callback copies parameters and nothing
 else: calling a hooked function from `eval_lua` in the same session has crashed the game, so read
 hook output through `poll_events`.
@@ -326,4 +322,3 @@ re-runs its source in place and retires the old poll loop, no relaunch.
 
 - MIT. See [LICENSE](LICENSE).
 - Built on [RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) by the UE4SS-RE team (MIT).
-- Written with an AI coding agent workflow.

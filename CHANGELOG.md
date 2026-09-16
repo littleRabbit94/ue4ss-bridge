@@ -3,8 +3,7 @@
 ## 1.2.1 (2026-09-14)
 
 - `get` and `set` no longer fail with `attempt to index a nil value (local 'prop')` raised inside
-  UE4SS's `ForEachProperty` when UE4SS hands the property-name check a nil entry (seen once in
-  play 2026-09-13). Every property walk now skips nil entries and counts them. When the name is
+  UE4SS's `ForEachProperty` when UE4SS hands the property-name check a nil entry . Every property walk now skips nil entries and counts them. When the name is
   not found and entries were skipped, the error says the class had unreadable properties instead
   of "no property"; `props` returns the count as `skipped`, a struct value as `__skipped`. An
   error inside a walk is raised after the walk returns, so it reaches the caller as an ordinary
@@ -12,8 +11,7 @@
 
 ## 1.2.0 (2026-09-11)
 
-**Renamed to ue4ss-bridge.** The old name collided with grapeot/ue-bridge, an Unreal Editor TCP
-bridge, and the new one says what the tool needs.
+**Renamed to ue4ss-bridge.** The old name collided with grapeot/ue-bridge, an Unreal Editor TCP bridge.
 
 - The PyPI package is `ue4ss-bridge`, the Python module is `ue4ss_bridge`, and the command is
   `ue4ss-bridge`. `argparse` and `--version` print the new name.
@@ -30,7 +28,7 @@ bridge, and the new one says what the tool needs.
 - `tools/build-release.py` now writes `dist/ue4ss-bridge-<version>.zip`; the folder inside the
   archive is still `ue4ss/Mods/UEBridge/`.
 
-**Event streams.** Watch a property or hook a function, play, then poll what piled up.
+**Event streams.** Watch a property or hook a function, then poll the recorded events.
 
 - New `watch` batch op and `watch_property` MCP tool (CLI: `watch <ref> <prop> <label>
   [--interval ms]`) sample one property or a list of them on a timer and record an event whenever
@@ -47,16 +45,13 @@ bridge, and the new one says what the tool needs.
   of game-thread time on a game without object hash tables. One sample is in flight at a time, so
   a slow game thread does not queue overlapping closures.
 - A watch survives a map change. When the reference stops resolving it records one
-  `{kind: "stream", event: "lost"}` row and retries at a slow cadence instead of every interval.
-  `{kind: "stream", event: "resumed"}` is recorded when the watch adopts a different object (by
-  address) after the previous one stopped being valid or was lost, with the baseline reset so the
+  `{kind: "stream", event: "lost"}` row and retries about once a second instead of every interval.
+  `{kind: "stream", event: "resumed"}` is recorded when the watch adopts a different object (by address and full name) after the previous one stopped being valid or was lost, with the baseline reset so the
   first sample on the new object is not reported as a change; the same object coming back after a
   blip records nothing. Only `stop_stream` ends a watch, and `list_streams` reports `lost`.
 - New `hook` batch op and `hook_function` MCP tool (CLI: `hook <fnpath> <label>`) record every
   call of a UFunction with up to `max_args` parameters (default 8) and the calling object's name.
-  The callback copies values and does nothing else. A hook registers cleanly, but an eval that
-  then CALLED the hooked function crashed the game with an access violation, so read hook output
-  through `poll_events` and do not call a hooked function from eval in the same session.
+  The callback copies values and does nothing else. After a hook registered, an eval that called the hooked function crashed the game (access violation). Read hook output through `poll_events`; do not call a hooked function from eval in the same session.
 - Hooking goes through `requireWrites`, since a hook intercepts game code: it is refused with
   `allow_writes = false`. Watches are read-only.
 - New `events` batch op and `poll_events` MCP tool (CLI: `events [label]`) drain the buffer:
@@ -118,7 +113,7 @@ bridge, and the new one says what the tool needs.
 - **Snapshot and diff.** Four new `batch` ops: `snapshot` (ref, label, include_super, pattern) keeps a property walk in the game under a label, `diff` (ref, label, update) re-walks with the stored options and reports `{changed, added, removed, same}` with dotted property paths, `snapshots` lists what is held, `forget` drops one label or all with `"*"`. MCP tools `snapshot_object`, `diff_object`, `list_snapshots`, `forget_snapshot` and the matching CLI subcommands.
 - All four are read-only: they work with `allow_writes = false` and `allow_eval = false`. Snapshots are keyed by label, not by object address, are stored on `_G` so `UEB.reload()` keeps them, and are lost when the game exits. Diffs ignore object and struct addresses and reuse the walk's depth and array caps, so an unchanged object diffs empty.
 - Values that are unstable between two walks no longer make an unchanged object diff non-empty: the userdata fallback compares by its `__type` and not its `tostring()` text, two `<error: ...>` read markers compare equal, a failed `ToString` encodes as `<FName>` rather than a pointer, and two NaNs compare equal. A plain Lua table longer than 200 keys sorts its keys before truncating, so the kept subset is the same on both walks.
-- `diff` returns its rows unchanged through `batch` instead of being re-encoded, so `changed`/`added`/`removed` always serialise as JSON lists and rows keep their full depth. Each list holds at most 500 rows, with a `truncated` count per list when that bites.
+- `diff` returns its rows unchanged through `batch` instead of being re-encoded, so `changed`/`added`/`removed` always serialise as JSON lists and rows keep their full depth. Each list holds at most 500 rows; `truncated` counts the rows dropped per list.
 - A snapshot's `taken` is `os.time()`, a wall-clock timestamp in whole seconds, not CPU time.
 - `diff_object`'s `ref` is optional and defaults to the reference the snapshot was taken with; the CLI accepts `diff <label>` as well as `diff <ref> <label>`.
 - Protocol bumped to 2 on both sides.

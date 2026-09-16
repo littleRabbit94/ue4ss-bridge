@@ -2,8 +2,8 @@
 
 Transport is two files in <game>\\Binaries\\Win64\\ue4ss\\bridge\\ (request.json / response.json).
 The Lua mod polls the request file, runs the request on the game thread, and writes the response.
-Nothing here needs sockets or admin rights, and nothing here names a particular game: the game is
-found by looking for a running exe in a Binaries\\Win64 folder that has ue4ss\\ beside it.
+No sockets or admin rights, and no game is named: the game is the running exe in a
+Binaries\\Win64 folder that has ue4ss\\ beside it.
 
 Run as an MCP server (stdio):   ue4ss-bridge            (or: python -m ue4ss_bridge)
 Run as an MCP server (HTTP):    ue4ss-bridge --http [--port 8930]
@@ -59,7 +59,7 @@ class BridgeError(RuntimeError):
 
 @dataclass
 class Game:
-    """Where the game is. Every path here is derived from the executable, nothing is assumed."""
+    """Game location. Every path is derived from the executable."""
     exe: Path | None            # ...\<Project>\Binaries\Win64\<Project>-Win64-Shipping.exe
     process: str | None         # image name without .exe
     project: str | None         # <Project>, the UE project name (also the %LOCALAPPDATA% folder)
@@ -467,7 +467,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 
         distance is in centimetres (the engine's unit), default 5000. channel is a trace channel:
         0 = Visibility, 1 = Camera. ref traces from that actor's own location and forward vector
-        instead of the camera, which is how you ask what an NPC faces.
+        instead of the camera (for example, what an NPC faces).
 
         Returns {hit} alone on a miss, otherwise {hit, actor, actor_class, component,
         component_class, distance, impact_point, impact_normal, bone, phys_material, materials}.
@@ -488,17 +488,15 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         costs roughly 10 to 25 ms of game-thread time on a game without object hash tables, so keep
         watches few and slow (250 ms or more).
 
-        The object is held between passes and rechecked with IsValid() on each one; a lookup
-        happens only when it is gone or a read failed, so the watch follows a reference such as
-        'first:PlayerController' across respawns without paying a scan per pass.
-        {kind: "stream", event: "resumed"} is recorded when the watch adopts a different object (by
-        address) after the previous one stopped being valid or was lost, with the baseline reset so
-        the first sample on the new object is not reported as a change; the same object coming back
-        after a blip records nothing. If the reference stops resolving (usually a map transition)
-        it records one {kind: "stream", event: "lost"} row and keeps retrying at a slow cadence.
-        Only stop_stream ends a watch.
+        The object is held between passes and rechecked with IsValid(); a lookup happens only when
+        it is gone or a read failed, so a reference such as 'first:PlayerController' follows
+        respawns without a scan per pass. Adopting a different object (by address and full name)
+        records {kind: "stream", event: "resumed"} and resets the baseline, so the first sample on
+        it is not reported as a change; the same object back after a blip records nothing. A
+        reference that stops resolving (usually a map transition) records one
+        {kind: "stream", event: "lost"} row and retries about once a second.
 
-        Labels are unique: reusing one raises. Stop a watch with stop_stream.
+        Labels are unique: reusing one raises. Only stop_stream ends a watch.
         """
         return one("watch", ref=ref, names=names, label=label,
                    interval_ms=int(interval_ms), every=bool(every))
@@ -511,10 +509,10 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         max_args caps how many parameters are copied per call (default 8). Read the calls with
         poll_events.
 
-        The callback copies parameters and the calling object's name and does nothing else. A
-        native hook registers cleanly, but an eval that then CALLS the hooked function crashed the
-        game with an access violation, so read hook output through poll_events and do not call a
-        hooked function from eval_lua in the same session.
+        The callback copies parameters and the calling object's name and does nothing else. After
+        a native hook registered, an eval that called the hooked function crashed the game (access
+        violation). Read hook output through poll_events; do not call a hooked function from
+        eval_lua in the same session.
 
         Hooking intercepts game code, so it is refused when allow_writes = false. Stop a hook with
         stop_stream, which unregisters it.
@@ -531,7 +529,7 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
 
         Returns {events, next, dropped, buffered}. Each row is {seq, t, label, kind} plus, for a
         watch, {path, before, after}, and for a hook, {fn, self, args}. The buffer holds 2000
-        events across all streams; `dropped` counts what the cap evicted before you read it.
+        events across all streams; `dropped` counts rows the cap evicted before they were read.
         """
         return one("events", timeout=30, since=int(since), label=label,
                    limit=int(limit), clear=bool(clear))
@@ -551,10 +549,11 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
         """Every reflected property of an object with its current value. Use on CDOs and live actors.
 
         pattern is an optional Lua pattern matched against the property name, e.g. "^Camera" or
-        "Speed"; one pawn can be 300 properties, so filtering is usually what you want.
+        "Speed". One pawn with its super chain is about 300 properties.
 
-        include_super defaults to False. SoftObjectProperty values are skipped (reading one has
-        crashed a game inside UE4SS's own property reader, which no Lua pcall can catch).
+        include_super defaults to False. SoftObjectProperty and SoftClassProperty values are
+        skipped: reading one has crashed a game inside UE4SS's property reader, which no Lua pcall
+        can catch.
         """
         return one("props", timeout=30, ref=ref, include_super=bool(include_super), read_soft=False, pattern=pattern)
 
@@ -629,15 +628,15 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
     def set_property(ref: str, name: str, value: Any) -> dict:
         """Write one property of an object (number, bool or string).
 
-        Returns {previous, current}. Writes are never undone, so `previous` is what you restore
-        from if the write turns out to be wrong. An unknown property name raises instead of
-        silently doing nothing. Refused when the mod's settings.lua sets allow_writes = false.
+        Returns {previous, current}; writes are never undone, so `previous` is the restore value.
+        An unknown property name raises instead of doing nothing. Refused when the mod's
+        settings.lua sets allow_writes = false.
         """
         return one("set", ref=ref, name=name, value=value)
 
     @mcp.tool(name="batch")
     def batch_tool(calls: list[dict]) -> dict:
-        """Run several bridge operations in ONE round trip and return a result per call.
+        """Run several bridge operations in one round trip and return a result per call.
 
         A round trip costs a poll interval plus latency against single-digit ms of actual work, so a
         sequence of small calls is nearly all waiting. Each entry is a dict with an "op" key:
@@ -666,8 +665,8 @@ def build_server(host: str = "127.0.0.1", port: int = 8930):
           {"op": "console", "command": ...}
           {"op": "dump",    "kind": ...}
 
-        Each result is {op, ok, result} or {op, ok: false, error}. One failing call does not
-        abandon the rest, so a batch is safe to use for exploration.
+        Each result is {op, ok, result} or {op, ok: false, error}. A failing call does not abandon
+        the rest.
         """
         return {"result": batch(calls, timeout=60)}
 

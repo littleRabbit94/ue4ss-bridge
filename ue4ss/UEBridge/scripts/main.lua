@@ -1,13 +1,12 @@
--- UEBridge: a file-based request/response channel so an external process (the ue4ss-bridge MCP
--- server, or anything else that can write a file) can run Lua inside a live UE4SS game without a
--- relaunch per question. Game-agnostic: nothing here names a game or an install path.
+-- UEBridge: a file-based request/response channel that lets an external process (the ue4ss-bridge
+-- MCP server, or anything that can write a file) run Lua inside a live UE4SS game. Game-agnostic:
+-- nothing here names a game or an install path.
 --
 --   external  ->  writes  <ue4ss>\bridge\request.json    {"id":..,"op":"eval","code":".."}
 --   this mod  ->  polls it, runs the code on the game thread, writes response.json
 --
--- The poll is a timer (LoopAsync), not a per-tick hook, and it only does work when the request
--- file exists. All game-object access happens inside ExecuteInGameThread. The mod opens no
--- sockets and starts no processes; everything it does is in reply to a file in its own folder.
+-- The poll is a LoopAsync timer, not a per-tick hook, and does work only when the request file
+-- exists. All game-object access happens inside ExecuteInGameThread. No sockets, no processes.
 --
 -- Wire format (protocol 3)
 --   request : {"id": string, "op": "hello"|"ping"|"eval"|"batch", "code": string, "calls": [..]}
@@ -24,9 +23,8 @@ local PROTOCOL = 3
 local MOD_NAME = "UEBridge"
 
 -- Paths -----------------------------------------------------------------------------------
--- Lua's io resolves relative paths against the process working directory, which is
--- Binaries\Win64 (the exe directory), NOT the ue4ss folder. Resolve an absolute path so the
--- bridge always lands in <ue4ss>\bridge regardless of how the game was launched.
+-- Lua io resolves relative paths against the process working directory (Binaries\Win64, the exe
+-- directory), not the ue4ss folder, so the bridge path is built absolute.
 local function ue4ssDir()
     local ok, dirs = pcall(IterateGameDirectories)
     local win64 = ok and dirs and dirs.Game and dirs.Game.Binaries and dirs.Game.Binaries.Win64
@@ -48,14 +46,9 @@ local function log(fmt, ...)
 end
 
 -- Settings ----------------------------------------------------------------------------------
--- scripts\settings.lua is optional and user-editable; every key has a default.
---   enabled       false turns the bridge off without removing the mod.
---   poll_ms       how often the request file is checked.
---   allow_eval    false refuses raw Lua ("eval"); the structured "batch" ops still work.
---   allow_writes  false refuses anything that changes state: set, call, console, hook, eval.
---   bridge_dir    override the request/response folder (absolute path).
--- The file lives in scripts\ because mod managers that deploy only <mod>\scripts would otherwise
--- drop it. scripts\settings.lua wins; a root copy (the 1.0.0 layout) is a fallback only.
+-- scripts\settings.lua is optional; the keys are documented there.
+-- It lives in scripts\ because mod managers that deploy only <mod>\scripts drop a root-level file.
+-- scripts\settings.lua wins; a root copy (the 1.0.0 layout) is a fallback only.
 local SETTINGS = { enabled = true, poll_ms = 50, allow_eval = true, allow_writes = true, bridge_dir = nil }
 local ROOT_SETTINGS_IGNORED = false
 do
@@ -78,7 +71,7 @@ if ROOT_SETTINGS_IGNORED then
     log("scripts\\settings.lua in use; ignoring %s\\settings.lua (1.0.0 layout, delete it)", MOD_DIR)
 end
 
--- eval can write, so allow_writes = false forces it off. Logged so the refusal names the cause.
+-- eval can write, so allow_writes = false forces it off; EVAL_FORCED_OFF lets the refusal say so.
 local EVAL_FORCED_OFF = false
 if not SETTINGS.allow_writes and SETTINGS.allow_eval then
     EVAL_FORCED_OFF = true
@@ -100,7 +93,8 @@ local function trace(s)
     if not traceOpened then traceHandle = io.open(TRACE, "wb") traceOpened = true end
     if not traceHandle then return end
     traceHandle:seek("set", 0)
-    -- Pad to a fixed width so a short line overwrites a longer one. (%-300s exceeds format's width cap.)
+    -- Fixed width so a short line overwrites a longer one. string.rep, since %-300s exceeds
+    -- string.format's two-digit width cap.
     local line = tostring(s):sub(1, 300)
     traceHandle:write(line .. string.rep(" ", 300 - #line))
     traceHandle:flush()
@@ -139,10 +133,10 @@ local function safe(fn, ...)
     return nil
 end
 
--- ForEachProperty wrapper. UE4SS can hand the callback nil (seen 2026-09-13 in a get/set name
--- check), and an error raised inside the callback escapes as a "[Lua::call_function]" error.
--- Nil entries are skipped and counted; fn errors stop the walk and are re-raised out here.
--- fn returning true stops the walk. Returns the number of nil entries skipped.
+-- ForEachProperty wrapper. UE4SS can pass the callback nil, and an error raised inside the
+-- callback escapes as a "[Lua::call_function]" error. Nil entries are skipped and counted; an fn
+-- error stops the walk and is re-raised here. fn returning true stops the walk.
+-- Returns the number of nil entries skipped.
 local function eachProperty(st, fn)
     local skipped, failed, failure = 0, false, nil
     st:ForEachProperty(function(prop)
@@ -218,7 +212,7 @@ local function encodeStruct(s, depth)
     local st, path = structType(s)
     out.__type = path
     if not st then
-        out.__fields = "guessed"          -- type would not resolve; fall back to the probe list
+        out.__fields = "guessed"          -- type did not resolve
         for _, k in ipairs(STRUCT_FIELDS) do
             local v = safe(function() return s[k] end)
             if v ~= nil then out[k] = encodeValue(v, depth + 1) end
@@ -273,7 +267,6 @@ function encodeValue(v, depth)
             local k = keys[i]
             out[type(k) == "number" and k or tostring(k)] = encodeValue(v[k], depth + 1)
         end
-        -- <more> is the dropped count.
         if n > MAX_ITEMS then out["<more>"] = n - MAX_ITEMS end
         return out
     end
@@ -378,9 +371,8 @@ function UEB.props(ref, includeSuper, readSoft, pattern)
 end
 
 -- Snapshots and diffs ---------------------------------------------------------------------
--- A snapshot is one UEB.props walk kept under a label so a later walk can be diffed against it.
--- Read-only: none of these ops touch requireWrites. Stored on _G so UEB.reload() (dofile) keeps
--- it; keyed by label, not object address, since addresses are reused after GC.
+-- A snapshot is one UEB.props walk kept under a label for a later diff. Read-only. Stored on _G
+-- so UEB.reload() (dofile) keeps it; keyed by label, not address, since addresses are reused after GC.
 UEB_SNAPSHOTS = UEB_SNAPSHOTS or {}
 
 -- Both sides of a diff come out of encodeValue with the same caps, so truncation markers match.
@@ -470,7 +462,7 @@ local function requireSnapshot(label)
           .. (#known > 0 and table.concat(known, ", ") or "<none>"))
 end
 
--- Walk an object and keep the result under label. Storing under an existing label replaces it.
+-- An existing label is replaced.
 function UEB.snapshot(ref, label, includeSuper, pattern)
     if type(label) ~= "string" or label == "" then error("snapshot needs a label (a non-empty string)") end
     if includeSuper == nil then includeSuper = false end
@@ -502,8 +494,7 @@ local function capRows(out)
     out.truncated = dropped
 end
 
--- Re-walk with the options the snapshot was taken with and compare against it.
--- ref = nil re-uses the reference the snapshot was taken with.
+-- Re-walks with the snapshot's options. ref = nil uses the snapshot's reference.
 function UEB.diff(ref, label, update)
     local snap = requireSnapshot(label)
     local opts = snap.options
@@ -582,8 +573,7 @@ function UEB.funcs(ref)
 end
 
 -- UE4SS returns an "<invalid>" object for an undeclared property name and silently ignores writes
--- to one, so get/set check the reflection first.
--- Returns found, and how many nil entries UE4SS handed the walk.
+-- to one, so get/set check the reflection first. Returns found, nil entries skipped.
 local function declaresProperty(cls, name)
     local skipped = 0
     while cls and cls:IsValid() do
@@ -695,8 +685,8 @@ function UEB.types(pattern, limit)
 end
 
 -- Subclasses -------------------------------------------------------------------------------
--- Every loaded class derived from a base class. There is no reverse index in the engine, so this
--- walks GUObjectArray once and tests IsChildOf; measured at about 1.5 s on a large game.
+-- Every loaded class derived from a base class. The engine has no reverse index, so this walks
+-- GUObjectArray once testing IsChildOf: about 1.5 s on a large game.
 function UEB.subclasses(ref, limit, pattern)
     limit = tonumber(limit) or 200
     local base = UEB.resolve(ref)
@@ -873,21 +863,17 @@ local function newStream(label, kind, rec)
     return rec
 end
 
--- Sample one or more properties on a timer and append an event when a value changes.
--- names may be a single name or a list. every = true appends every sample instead.
--- The game-thread runner is built once, at creation: the LoopAsync body allocates nothing, because
--- allocating on the mod's async thread while the game thread runs Lua in the same state corrupts
--- that state (a 50 ms watch crashed a game in lua_next).
--- The resolved object is held between passes and rechecked with IsValid() on each one. A lookup
--- happens only when the object is gone (IsValid() false, or a read faulted and dropped it) or
--- while the watch is lost, since a lookup costs a full object scan on the game thread and a
--- healthy watch has no use for the result.
--- A reference that stops resolving records one "lost" row and keeps retrying at a slow cadence.
--- A "resumed" row (with the new path) is recorded when the watch adopts a different object, judged
--- by address and full name, after the previous one stopped being valid or was lost; the baseline is
--- reset so the first sample on the new object is not reported as a change. The same object coming
--- back after a blip records nothing (a UObject without GetAddress always counts as different).
--- Only unwatch stops a watch.
+-- Sample properties on a timer and append an event on change (every = true: on every sample).
+-- names is one name or a list.
+-- The game-thread runner is built once: the LoopAsync body allocates nothing, because allocating
+-- on the mod's async thread while the game thread runs Lua in the same state corrupts that state
+-- (a 50 ms watch crashed a game in lua_next).
+-- The object is held between passes and rechecked with IsValid(). A lookup, a full object scan on
+-- the game thread, happens only when the object is gone, a read faulted, or the watch is lost.
+-- A reference that stops resolving records one "lost" row and retries about once a second.
+-- Adopting a different object (by address and full name) records a "resumed" row with the new
+-- path and resets the baseline. The same object back after a blip records nothing; a UObject
+-- without GetAddress always counts as different. Only unwatch stops a watch.
 function UEB.watch(ref, names, label, interval_ms, every)
     if type(names) == "string" then names = { names } end
     if type(names) ~= "table" or #names == 0 then error("watch needs a property name, or a list of names") end
@@ -912,10 +898,9 @@ function UEB.watch(ref, names, label, interval_ms, every)
             local okV, isValid = pcall(function() return obj:IsValid() end)
             if not (okV and isValid == true) then obj, rec.obj = nil, nil end
         end
-        -- Look up only when there is nothing valid to read. A healthy watch would never act on a
-        -- fresh lookup, and a lookup is a 10 to 25 ms object scan on the game thread. A respawn
-        -- shows up as IsValid() going false; a stale object that faults raises into the per-name
-        -- pcall below, which drops the cache and so resolves on the next pass.
+        -- A lookup is a 10 to 25 ms object scan on the game thread, so only when nothing valid is
+        -- cached. A respawn shows as IsValid() false; a stale object that faults raises into the
+        -- per-name pcall below, which drops the cache.
         if obj == nil then
             local okR, fresh = pcall(UEB.resolve, rec.ref)
             if okR and fresh ~= nil then
@@ -923,14 +908,13 @@ function UEB.watch(ref, names, label, interval_ms, every)
                 local freshPath = safe(function() return fresh:GetFullName() end)
                 if not rec.lost and freshAddr ~= nil and freshAddr == rec.addr
                         and freshPath ~= nil and freshPath == rec.path then
-                    -- The same object back after a transient blip or a read fault: keep watching
-                    -- it, keep the baseline, say nothing. Address alone is not identity, since UE
-                    -- reuses object slots and a respawn can land in the freed one; the name settles it.
+                    -- Same object back after a blip or read fault: keep the baseline, no row.
+                    -- Address alone is not identity: UE reuses object slots and a respawn can land
+                    -- in the freed one.
                     obj, rec.obj = fresh, fresh
                 else
-                    -- A different object, because the previous one stopped being valid (a respawn)
-                    -- or was lost. Start clean so the first sample on the new object is not
-                    -- reported as a change of the old one.
+                    -- A different object (respawn, or recovery from lost). Reset the baseline so its
+                    -- first sample is not reported as a change.
                     obj, rec.obj = fresh, fresh
                     rec.last, rec.seen = {}, {}
                     rec.lost, rec.skip = false, 0
@@ -939,8 +923,7 @@ function UEB.watch(ref, names, label, interval_ms, every)
                     pushEvent({ label = label, kind = "stream", event = "resumed", path = rec.path })
                 end
             else
-                -- Usually a map transition took the object away. Report it once, then keep the
-                -- stream alive and retry slowly until the reference resolves again.
+                -- Usually a map transition. Report once, keep the stream, retry slowly.
                 if not rec.lost then
                     rec.lost = true
                     pushEvent({ label = label, kind = "stream", event = "lost",
@@ -969,8 +952,7 @@ function UEB.watch(ref, names, label, interval_ms, every)
             end
             rec.last[name], rec.seen[name] = enc, true
             if not okv then
-                -- The cached object misbehaved: drop it and stop reading the rest of the names off
-                -- it. The next pass resolves before it reads.
+                -- Drop the faulting object and skip the remaining names; the next pass resolves first.
                 rec.obj = nil
                 break
             end
@@ -1137,7 +1119,7 @@ function UEB.world()
     return out
 end
 
--- What the server needs to know about this end before it does anything else.
+-- Handshake: version, protocol and the settings in effect.
 function UEB.hello()
     return {
         mod = MOD_NAME, version = VERSION, protocol = PROTOCOL,
@@ -1175,9 +1157,9 @@ local PREENCODED_OPS = { props = true, funcs = true, objects = true, types = tru
 -- available when allow_eval is off.
 local BATCH_OPS = {
     hello   = function(a) return UEB.hello() end,
-    -- Read-only on purpose: the recovery path when allow_eval is off. UEB.reload() dofile()s this
-    -- file on the game thread this handler already runs on; UEB.hello() is resolved after it so
-    -- the reply carries the new settings.
+    -- Read-only: the recovery path when allow_eval is off. UEB.reload() runs dofile on the game
+    -- thread this handler is already on; UEB.hello() is looked up after it so the reply carries
+    -- the new settings.
     reload  = function(a)
         local msg = UEB.reload()
         local info = UEB.hello()
